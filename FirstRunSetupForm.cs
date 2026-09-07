@@ -8,7 +8,7 @@ namespace Tugle;
 
 internal sealed class FirstRunSetupForm : Form
 {
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
     private readonly WebView2 _view = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(248, 249, 252) };
     private readonly Func<Task<CoreWebView2Environment>> _getEnvironment;
     private readonly string _pageUrl = new Uri(Path.Combine(AppContext.BaseDirectory, "TugleSetup.html")).AbsoluteUri;
@@ -17,6 +17,7 @@ internal sealed class FirstRunSetupForm : Form
     private readonly Dictionary<string, string> _media = new();
     private ThemePalette? _customTheme;
     public bool ConnectGoogle { get; private set; }
+    public bool UseSiteColors { get; private set; }
     public ThemePalette SelectedTheme { get; private set; } = ThemePalettes.Ocean;
     public string SelectedThemeName => SelectedTheme.Name;
     public string? SelectedBackgroundMediaUrl { get; private set; }
@@ -24,10 +25,11 @@ internal sealed class FirstRunSetupForm : Form
     public Color SelectedBackground { get; private set; } = Color.FromArgb(7, 21, 38);
     public Color SelectedBackgroundSecondary { get; private set; } = Color.FromArgb(32, 61, 91);
 
-    public FirstRunSetupForm(Func<Task<CoreWebView2Environment>> getEnvironment, ThemePalette initialTheme)
+    public FirstRunSetupForm(Func<Task<CoreWebView2Environment>> getEnvironment, ThemePalette initialTheme, bool useSiteColors)
     {
         _getEnvironment = getEnvironment;
         SelectedTheme = initialTheme;
+        UseSiteColors = useSiteColors;
         if (initialTheme.Name == "Custom") _customTheme = initialTheme;
         var palette = initialTheme;
         _view.DefaultBackgroundColor = palette.ContentBackground;
@@ -170,7 +172,7 @@ internal sealed class FirstRunSetupForm : Form
             switch (root.GetProperty("action").GetString())
             {
                 case "ready":
-                    Post(new { type = "themes", themes = ThemePalettes.ColorOptions.Select(PaletteData), custom = _customTheme is null ? null : PaletteData(_customTheme), selected = SelectedThemeName });
+                    Post(new { type = "themes", themes = ThemePalettes.ColorOptions.Select(PaletteData), custom = _customTheme is null ? null : PaletteData(_customTheme), selected = UseSiteColors ? "Site colors" : SelectedThemeName });
                     ConnectGoogle = await GoogleSession.IsConnectedAsync(_view.CoreWebView2);
                     if (!IsDisposed) Post(new { type = "account", connected = ConnectGoogle, initial = true });
                     break;
@@ -178,7 +180,9 @@ internal sealed class FirstRunSetupForm : Form
                     Close();
                     break;
                 case "theme":
-                    var selected = FindTheme(root.GetProperty("name").GetString());
+                    var name = root.GetProperty("name").GetString();
+                    UseSiteColors = name == "Site colors";
+                    var selected = FindTheme(name);
                     if (selected is not null) { SelectedTheme = selected; UpdateTitleColor(); }
                     break;
                 case "pickTheme":
@@ -213,7 +217,8 @@ internal sealed class FirstRunSetupForm : Form
                     break;
                 case "finish":
                     var themeName = root.GetProperty("theme").GetString();
-                    var finishTheme = FindTheme(themeName);
+                    UseSiteColors = themeName == "Site colors";
+                    var finishTheme = UseSiteColors ? ThemePalettes.Ocean : FindTheme(themeName);
                     if (finishTheme is null) return;
                     var background = root.GetProperty("background");
                     var mode = background.GetProperty("mode").GetString();

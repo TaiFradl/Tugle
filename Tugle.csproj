@@ -8,9 +8,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Tugle</AssemblyName>
     <RootNamespace>Tugle</RootNamespace>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,7 +21,6 @@
     <Content Include="assets\tugle-icon.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="assets\Slabo13px-Regular.ttf" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="assets\Slabo13px-OFL.txt" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="assets\ublock\**\*" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="assets\cookie-guard\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

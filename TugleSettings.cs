@@ -9,6 +9,7 @@ internal sealed class TugleSettings
     public float GuiScale { get; set; } = 0.9f;
     public string ThemeName { get; set; } = "Ocean";
     public string? CustomThemeAccent { get; set; }
+    public bool UseSiteColors { get; set; }
     public string HomeBackgroundMode { get; set; } = "gradient";
     public string HomeBackground { get; set; } = "#071526";
     public string HomeBackgroundSecondary { get; set; } = "#203D5B";

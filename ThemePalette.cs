@@ -220,7 +220,8 @@ internal static class ThemePalettes
         Ember,
         ThemePalette.FromAccent("Gold", "Golden yellow", Color.FromArgb(240, 210, 100)),
         Forest,
-        ThemePalette.FromAccent("Cyan", "Clear cyan", Color.FromArgb(97, 230, 230))
+        ThemePalette.FromAccent("Cyan", "Clear cyan", Color.FromArgb(97, 230, 230)),
+        ThemePalette.FromAccent("Coral", "Warm coral", Color.FromArgb(255, 139, 122))
     ];
 
     public static IReadOnlyList<ThemePalette> All { get; } = [Ocean, Violet, Forest, Ember];

@@ -26,6 +26,8 @@ public sealed class MainForm : SnapWindowForm
     private const int WmHotKey = 0x0312;
 
     private ThemePalette _theme = ThemePalettes.Ocean;
+    private ThemePalette _selectedTheme = ThemePalettes.Ocean;
+    private bool _useSiteColors;
     private static readonly Color DefaultCustomColor = Color.FromArgb(128, 128, 128);
     private Color _homeBackground = ColorTranslator.FromHtml("#071526");
     private Color _homeBackgroundSecondary = ColorTranslator.FromHtml("#203D5B");
@@ -115,11 +117,7 @@ public sealed class MainForm : SnapWindowForm
         "googleadservices.com",
         "adservice.google.com",
         "adsrvr.org",
-        "adnxs.com",
-        "connect.facebook.net",
-        "scorecardresearch.com",
-        "analytics.google.com",
-        "googletagmanager.com"
+        "adnxs.com"
     };
 
     private sealed class BrowserTab
@@ -226,12 +224,14 @@ public sealed class MainForm : SnapWindowForm
             
             if (!_settings.SetupCompleted || _settings.SetupVersion < FirstRunSetupForm.CurrentVersion)
             {
-                using var setup = new FirstRunSetupForm(GetEnvironmentAsync, _theme);
+                using var setup = new FirstRunSetupForm(GetEnvironmentAsync, _selectedTheme, _useSiteColors);
                 if (setup.ShowDialog(this) == DialogResult.OK)
                 {
                     _settings.LowMemoryMode = true;
                     _settings.ReduceMotion = true;
-                    SetTheme(setup.SelectedTheme);
+                    _selectedTheme = setup.SelectedTheme;
+                    _useSiteColors = setup.UseSiteColors;
+                    SetTheme(_selectedTheme, saveSettings: false);
                     _homeBackgroundMode = setup.SelectedBackgroundMode;
                     _homeBackground = setup.SelectedBackground;
                     _homeBackgroundSecondary = setup.SelectedBackgroundSecondary;
@@ -254,9 +254,11 @@ public sealed class MainForm : SnapWindowForm
         _guiScale = Math.Clamp(_settings.GuiScale, 0.7f, 1.4f);
         var savedTheme = ThemePalettes.ColorOptions.FirstOrDefault(theme =>
             string.Equals(theme.Name, _settings.ThemeName, StringComparison.OrdinalIgnoreCase));
-        _theme = _settings.ThemeName == "Custom" && _settings.CustomThemeAccent is not null
+        _selectedTheme = _settings.ThemeName == "Custom" && _settings.CustomThemeAccent is not null
             ? ThemePalette.FromAccent("Custom", "Custom accent color", TugleSettings.FromHex(_settings.CustomThemeAccent, ThemePalettes.Ocean.Accent))
             : savedTheme ?? ThemePalettes.Ocean;
+        _theme = _selectedTheme;
+        _useSiteColors = _settings.UseSiteColors;
         TugleTheme.Current = _theme;
         _homeBackgroundMode = string.IsNullOrWhiteSpace(_settings.HomeBackgroundMode) ? "gradient" : _settings.HomeBackgroundMode;
         _homeBackground = TugleSettings.FromHex(_settings.HomeBackground, ColorTranslator.FromHtml("#071526"));
@@ -273,8 +275,9 @@ public sealed class MainForm : SnapWindowForm
     private void SaveSettings()
     {
         _settings.GuiScale = _guiScale;
-        _settings.ThemeName = _theme.Name;
-        if (_theme.Name == "Custom") _settings.CustomThemeAccent = TugleSettings.ToHex(_theme.Accent);
+        _settings.ThemeName = _selectedTheme.Name;
+        if (_selectedTheme.Name == "Custom") _settings.CustomThemeAccent = TugleSettings.ToHex(_selectedTheme.Accent);
+        _settings.UseSiteColors = _useSiteColors;
         _settings.HomeBackgroundMode = _homeBackgroundMode;
         _settings.HomeBackground = TugleSettings.ToHex(_homeBackground);
         _settings.HomeBackgroundSecondary = TugleSettings.ToHex(_homeBackgroundSecondary);
@@ -758,29 +761,20 @@ public sealed class MainForm : SnapWindowForm
 
     private async Task EnsureUBlockAsync(CoreWebView2 core)
     {
-        if (_uBlockEnabled) return;
-
-        var extensionPath = Path.Combine(AppContext.BaseDirectory, "assets", "ublock");
-        if (!File.Exists(Path.Combine(extensionPath, "manifest.json"))) return;
-
         try
         {
             var installed = await core.Profile.GetBrowserExtensionsAsync();
             _uBlockExtension = installed.FirstOrDefault(extension =>
                 extension.Name.Equals("uBlock Origin", StringComparison.OrdinalIgnoreCase));
-
-            if (_uBlockExtension is null)
-                _uBlockExtension = await core.Profile.AddBrowserExtensionAsync(extensionPath);
-
-            if (_uBlockExtension is not null && !_uBlockExtension.IsEnabled)
-                await _uBlockExtension.EnableAsync(true);
-
-            _uBlockEnabled = _uBlockExtension?.IsEnabled == true;
+            // A full third-party filter list can block scripts that a site needs to
+            // load. Tugle uses the small, conservative built-in ad-host list below.
+            if (_uBlockExtension is not null)
+                await _uBlockExtension.EnableAsync(false);
+            _uBlockEnabled = false;
         }
         catch
         {
-            // Keep the small built-in fallback blocker active if an older WebView2
-            // Runtime cannot load the extension API or the unpacked extension.
+            // The built-in blocker does not depend on extension support.
             _uBlockEnabled = false;
         }
     }
@@ -874,6 +868,8 @@ public sealed class MainForm : SnapWindowForm
 
         if (ReferenceEquals(tab, _activeTab))
         {
+            if (_useSiteColors)
+                await ApplySiteThemeAsync(tab);
             SetLoadingState(false);
             UpdateAddressBar();
             UpdateNavigationButtons();
@@ -986,7 +982,10 @@ public sealed class MainForm : SnapWindowForm
     private void OnWebResourceRequested(BrowserTab tab, CoreWebView2WebResourceRequestedEventArgs e)
     {
         if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var uri)) return;
-        if (_uBlockEnabled || !IsBlockedHost(uri.Host) || tab.View.CoreWebView2 is null) return;
+        // A page document must always be allowed. Only subresources from dedicated
+        // advertising hosts are filtered, so a page cannot fail to open here.
+        if (_uBlockEnabled || e.ResourceContext == CoreWebView2WebResourceContext.Document ||
+            !IsBlockedHost(uri.Host) || tab.View.CoreWebView2 is null) return;
 
         e.Response = tab.View.CoreWebView2.Environment.CreateWebResourceResponse(
             Stream.Null,
@@ -1406,7 +1405,7 @@ public sealed class MainForm : SnapWindowForm
         using var dialog = new ColorPickerDialog(DefaultCustomColor, "Custom theme color", _theme);
 
         if (dialog.ShowDialog(this) == DialogResult.OK)
-            SetTheme(ThemePalette.FromAccent("Custom", "Custom accent color", dialog.SelectedColor));
+            SelectTheme(ThemePalette.FromAccent("Custom", "Custom accent color", dialog.SelectedColor));
     }
 
     private void ChooseCustomHomeBackground(BrowserTab tab)
@@ -1579,16 +1578,23 @@ public sealed class MainForm : SnapWindowForm
 
             case ActionFlyoutMode.Theme:
                 _actionFlyoutTitle.Text = "Theme";
+                AddActionFlyoutSectionLabel("ADAPTIVE", "Changes with each site");
+                AddActionFlyoutButton(
+                    "Match site colors",
+                    "Use a safe color from the active site",
+                    () => SetSiteColorTheme(true),
+                    _useSiteColors,
+                    swatch: Color.FromArgb(104, 169, 255));
                 AddActionFlyoutSectionLabel("PRESET COLORS", "10 colors");
                 foreach (var theme in ThemePalettes.ColorOptions)
                 {
-                    var selected = string.Equals(theme.Name, _theme.Name, StringComparison.OrdinalIgnoreCase);
+                    var selected = !_useSiteColors && string.Equals(theme.Name, _selectedTheme.Name, StringComparison.OrdinalIgnoreCase);
                     AddActionFlyoutButton(
                         theme.Name,
                         theme.Description,
                         () =>
                         {
-                            SetTheme(theme);
+                            SelectTheme(theme);
                         },
                         selected,
                         swatch: theme.Accent);
@@ -1898,7 +1904,24 @@ public sealed class MainForm : SnapWindowForm
             activeCount > 0 ? $"Downloads ({activeCount} active)" : "Downloads (Ctrl+J)");
     }
 
-    private void SetTheme(ThemePalette theme)
+    private void SelectTheme(ThemePalette theme)
+    {
+        _selectedTheme = theme;
+        _useSiteColors = false;
+        SetTheme(theme);
+    }
+
+    private void SetSiteColorTheme(bool enabled)
+    {
+        _useSiteColors = enabled;
+        if (!enabled || _activeTab is null || _activeTab.IsHome)
+            SetTheme(_selectedTheme, saveSettings: false);
+        else
+            _ = ApplySiteThemeAsync(_activeTab);
+        SaveSettings();
+    }
+
+    private void SetTheme(ThemePalette theme, bool saveSettings = true)
     {
         if (ReferenceEquals(theme, _theme)) return;
 
@@ -1989,7 +2012,7 @@ public sealed class MainForm : SnapWindowForm
             ResumeLayout(true);
             PerformLayout();
         }
-        SaveSettings();
+        if (saveSettings) SaveSettings();
     }
 
     private static void InvalidateThemeControls(Control control)
@@ -2223,6 +2246,78 @@ public sealed class MainForm : SnapWindowForm
         UpdateAddressBar();
         UpdateNavigationButtons();
         if (tab.IsHome) _ = PopulateHomeAsync(tab);
+        if (_useSiteColors) await ApplySiteThemeAsync(tab);
+    }
+
+    private async Task ApplySiteThemeAsync(BrowserTab tab)
+    {
+        if (!_useSiteColors || tab.View.IsDisposed || !ReferenceEquals(tab, _activeTab)) return;
+        if (tab.IsHome || tab.View.CoreWebView2?.Source is null)
+        {
+            SetTheme(_selectedTheme, saveSettings: false);
+            return;
+        }
+
+        var source = tab.View.CoreWebView2.Source;
+        var accent = await GetSiteAccentAsync(tab.View.CoreWebView2);
+        if (!_useSiteColors || tab.View.IsDisposed || !ReferenceEquals(tab, _activeTab) ||
+            !string.Equals(source, tab.View.CoreWebView2.Source, StringComparison.OrdinalIgnoreCase)) return;
+
+        SetTheme(ThemePalette.FromAccent("Site colors", "Matches the active site", accent), saveSettings: false);
+    }
+
+    private static async Task<Color> GetSiteAccentAsync(CoreWebView2 core)
+    {
+        var host = Uri.TryCreate(core.Source, UriKind.Absolute, out var source) ? source.Host : "tugle";
+        var fallback = SiteAccentForHost(host);
+        try
+        {
+            var value = await core.ExecuteScriptAsync("""
+                (() => document.querySelector('meta[name="theme-color"]')?.content ||
+                    getComputedStyle(document.documentElement).getPropertyValue('--theme-color').trim() || '')()
+                """);
+            var declared = JsonSerializer.Deserialize<string>(value);
+            if (TryGetUsableAccent(declared, out var accent)) return accent;
+        }
+        catch
+        {
+            // Sites may prohibit script execution during navigation. The host color is stable.
+        }
+        return fallback;
+    }
+
+    private static bool TryGetUsableAccent(string? value, out Color color)
+    {
+        color = Color.Empty;
+        if (string.IsNullOrWhiteSpace(value) || !value.TrimStart().StartsWith('#')) return false;
+        try { color = ColorTranslator.FromHtml(value); }
+        catch { return false; }
+        return color.GetSaturation() >= .25f && color.GetBrightness() is >= .18f and <= .82f;
+    }
+
+    private static Color SiteAccentForHost(string host)
+    {
+        unchecked
+        {
+            var hash = 17;
+            foreach (var character in host.ToLowerInvariant()) hash = hash * 31 + character;
+            var hue = (uint)hash % 360;
+            return ColorFromHsl(hue, .64, .61);
+        }
+    }
+
+    private static Color ColorFromHsl(double hue, double saturation, double lightness)
+    {
+        var chroma = (1 - Math.Abs(2 * lightness - 1)) * saturation;
+        var segment = hue / 60;
+        var secondary = chroma * (1 - Math.Abs(segment % 2 - 1));
+        var (red, green, blue) = segment switch
+        {
+            < 1 => (chroma, secondary, 0d), < 2 => (secondary, chroma, 0d), < 3 => (0d, chroma, secondary),
+            < 4 => (0d, secondary, chroma), < 5 => (secondary, 0d, chroma), _ => (chroma, 0d, secondary)
+        };
+        var offset = lightness - chroma / 2;
+        return Color.FromArgb((int)Math.Round((red + offset) * 255), (int)Math.Round((green + offset) * 255), (int)Math.Round((blue + offset) * 255));
     }
 
     private async Task RevealTabAsync(BrowserTab tab)

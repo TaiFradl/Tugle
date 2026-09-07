@@ -1,11 +1,11 @@
 # Tugle
 
-Tugle is the first prototype of a lightweight, single-tab Windows browser.
+Tugle is a lightweight Windows browser with a focused, custom interface.
 
 ## What is in this prototype
 
 - A Firefox-inspired dark browser toolbar
-- One active tab named Tugle
+- Browser tabs with inactive-tab suspension
 - Address bar that accepts URLs or search text
 - Back, forward, reload, and home buttons
 - History menu with the 12 most recent visits (`Ctrl+H`)
@@ -17,7 +17,8 @@ Tugle is the first prototype of a lightweight, single-tab Windows browser.
 - Persistent settings and a persistent WebView2 profile across restarts
 - A clean Tugle start page
 - A privacy indicator
-- A small built-in blocker for common advertising and analytics hosts
+- A safe built-in blocker for dedicated advertising hosts
+- Match site colors in setup and the Theme menu
 
 The start page is stored locally in `TugleHome.html` and loaded as a normal page. This avoids injecting a large image-embedded HTML string into WebView2, which caused the earlier blank-page bug.
 
@@ -31,7 +32,7 @@ The search behavior is in `MainForm.cs`, inside `NavigateFromAddressBar()`.
 
 - C# and .NET 8 Windows Forms
 - Microsoft Edge WebView2 for displaying websites
-- One WebView2 instance, keeping the first prototype simple and avoiding extra tab processes
+- One WebView2 instance per open tab
 - Generated Tugle app icon in `assets\tugle-icon.png` and `assets\tugle-icon.ico`
 
 ## Could Tugle use C++?
@@ -46,7 +47,7 @@ The first-run setup stores its choices in `%LOCALAPPDATA%\Tugle\settings.json`. 
 
 Tugle starts maximized and supports native Windows snapping, resizing, and the maximize-button Snap Layouts menu. F11 toggles taskbar-covering fullscreen and restores the previous window state. Setup starts maximized with standard Windows window controls. Its Google → Theme → Background steps keep one kind of choice on each page, with a live home-page preview beside the current controls or above them in narrower windows.
 
-Setup version 6 uses the main browser palette, Tugle branding, and minimal text. Theme has its own page with named color choices and a custom color picker. Background has its own page with Color, Gradient, Picture, and Video options beside a live home-page preview. Custom theme accents and selected media paths persist across restarts. Closing setup leaves it incomplete so it appears again on next launch. Done saves appearance before opening the home page. Existing history and website sessions are preserved.
+Setup version 7 uses the main browser palette, Tugle branding, and minimal text. Theme has its own page with named color choices, **Match site colors**, and a custom color picker. Background has its own page with Color, Gradient, Picture, and Video options beside a live home-page preview. Custom theme accents, site-color mode, and selected media paths persist across restarts. Closing setup leaves it incomplete so it appears again on next launch. Done saves appearance before opening the home page. Existing history and website sessions are preserved.
 
 Google sign-in opens in the system browser instead of an embedded WebView. Setup provides an explicit Continue button after the user returns. Existing Google sessions already present in Tugle are recognized, but system-browser cookies are intentionally not copied into WebView2. Full Google account linking would require a registered OAuth desktop client and is not claimed by this handoff. No Google password is collected by setup.
 
@@ -60,9 +61,9 @@ For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separa
 
 The Accounts toolbar button opens Google in the system browser and shows the account panel when you return. Tugle does not collect or store a Google password. Existing sessions inside Tugle are detected from its own WebView2 profile; system-browser cookies are not copied into Tugle. A future sync service would need an explicit provider and separate encryption design.
 
-## Ad blocking status
+## Site colors and ad blocking
 
-The current blocker is intentionally small and built into the prototype. It blocks a short list of known advertising and analytics hosts before their resources load. It is not yet a complete uBlock-style filter engine, and it does not yet download or update filter lists.
+Match site colors safely changes Tugle’s accent using a site’s declared theme color, or a stable fallback color for that site. The home page uses the selected base theme. The built-in blocker never blocks a page document and only filters a short list of dedicated advertising hosts. It is not a full filter-list engine.
 
 ## Design
 
@@ -84,7 +85,7 @@ Microsoft Edge WebView2 Runtime must be installed on the computer.
 
 ## Current limitations
 
-- Single tab only
+- Tabs are not restored after restarting Tugle
 - No bookmarks or full-history page yet
 - No filter-list updater yet
 - No installer yet
