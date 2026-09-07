@@ -52,6 +52,8 @@ Google sign-in opens in the system browser instead of an embedded WebView. Setup
 
 Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. A newer release offers its portable ZIP download; the same check is available from Accounts → Check for updates.
 
+Pushing a tag such as `v1.0.1` builds and publishes `Tugle-browser.zip` through the GitHub Actions release workflow.
+
 For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separate profile folder. Settings, history, and WebView2 data then use that folder. Leave it unset for normal use.
 
 ## Accounts and Google sign-in

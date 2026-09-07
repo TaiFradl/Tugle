@@ -1,0 +1,28 @@
+name: Release Tugle
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build portable Windows package
+        shell: pwsh
+        run: |
+          dotnet publish Tugle.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o publish/Tugle
+          Compress-Archive -Path publish/Tugle -DestinationPath Tugle-browser.zip -CompressionLevel Optimal
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" Tugle-browser.zip --generate-notes
