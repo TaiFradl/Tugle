@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Tugle Cookie Guard",
+  "version": "1.0.0",
+  "description": "Automatically rejects optional cookie consent and hides common cookie banners.",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["cookie-guard.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

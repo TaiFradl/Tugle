@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tugle</title>
+  <style>
+    @font-face {
+      font-family: "Slabo 13px";
+      src: url("assets/Slabo13px-Regular.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+    }
+
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", Arial, sans-serif;
+      --home-bg: #0b1018;
+      --home-panel: #1f2937;
+      --home-panel-hover: #222f41;
+      --home-border: #3a475b;
+      --home-border-strong: #5c83b7;
+      --home-text: #edf2f8;
+      --home-muted: #91a0b5;
+      --home-accent: #4ccdbb;
+      --home-selection: #30415a;
+      --home-detail: #aebdd1;
+      background: var(--home-bg);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: clamp(24px, 8vh, 88px) 24px 32px;
+      background: var(--home-bg);
+      color: var(--home-text);
+    }
+
+    #background-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      overflow: hidden;
+      pointer-events: none;
+      background: var(--home-bg);
+    }
+
+    #background-layer::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: rgba(6, 10, 16, .28);
+    }
+
+    #background-layer img,
+    #background-layer video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+      opacity: .68;
+    }
+
+    main {
+      width: min(880px, 100%);
+      position: relative;
+      z-index: 1;
+      text-align: center;
+    }
+
+    .mark {
+      width: 104px;
+      height: 104px;
+      margin: 0 auto 18px;
+      display: block;
+      object-fit: cover;
+      border-radius: 32px;
+      filter: drop-shadow(0 18px 28px rgba(0, 0, 0, .38));
+    }
+
+    h1 {
+      margin: 0 0 30px;
+      font-size: clamp(34px, 5vw, 52px);
+      letter-spacing: -.06em;
+      font-weight: 500;
+      background: linear-gradient(105deg, #49e7c0 4%, #39bfe6 48%, #537ff7 96%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: #49e7c0;
+      -webkit-text-fill-color: transparent;
+      text-shadow: 0 3px 22px rgba(0, 0, 0, .22);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 18px;
+      margin: 0 auto 28px;
+      text-align: left;
+    }
+
+    .brand-mark {
+      position: relative;
+      width: 82px;
+      height: 82px;
+      flex: 0 0 82px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--home-border-strong);
+      border-radius: 27px;
+      background: linear-gradient(145deg, rgba(76, 205, 187, .13), var(--home-panel));
+      box-shadow: 0 16px 36px rgba(0, 0, 0, .32), 0 0 26px rgba(76, 205, 187, .18);
+      overflow: hidden;
+    }
+
+    .brand-mark::before {
+      content: "";
+      position: absolute;
+      width: 64px;
+      height: 30px;
+      top: -16px;
+      left: -12px;
+      border-radius: 50%;
+      background: rgba(76, 205, 187, .35);
+      filter: blur(10px);
+    }
+
+    .brand .mark {
+      position: relative;
+      z-index: 1;
+      width: 68px;
+      height: 68px;
+      margin: 0;
+      border-radius: 21px;
+      box-shadow: none;
+    }
+
+    .brand-copy { min-width: 0; }
+
+    .brand-kicker {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0 0 4px;
+      color: var(--home-detail);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .brand-kicker::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      flex: 0 0 6px;
+      border-radius: 50%;
+      background: var(--home-accent);
+      box-shadow: 0 0 10px var(--home-accent);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: clamp(38px, 4.3vw, 50px);
+      line-height: .98;
+      letter-spacing: -.065em;
+      font-weight: 500;
+      text-shadow: 0 3px 22px rgba(0, 0, 0, .28);
+    }
+
+    .brand-subtitle {
+      margin: 7px 0 0;
+      color: var(--home-muted);
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .home-identity {
+      display: inline-flex;
+      align-items: center;
+      gap: 18px;
+      margin: 0 auto 30px;
+      padding: 10px 22px 10px 10px;
+      border: 1px solid rgba(92, 131, 183, .32);
+      border-radius: 20px;
+      background: linear-gradient(110deg, rgba(48, 65, 90, .58), rgba(31, 41, 55, .16));
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .18);
+      text-align: left;
+    }
+
+    .identity-mark {
+      width: 78px;
+      height: 78px;
+      flex: 0 0 78px;
+      display: grid;
+      place-items: center;
+      border-radius: 15px;
+      background: linear-gradient(135deg, rgba(76, 205, 187, .16), rgba(73, 115, 246, .18));
+    }
+
+    .home-identity .mark {
+      width: 70px;
+      height: 70px;
+      margin: 0;
+      border-radius: 18px;
+      filter: none;
+    }
+
+    .identity-copy { min-width: 132px; }
+
+    .home-identity h1 {
+      margin: 0;
+      color: var(--home-text);
+      background: none;
+      -webkit-text-fill-color: var(--home-text);
+      font-size: clamp(40px, 4.6vw, 54px);
+      font-weight: 500;
+      line-height: .94;
+      letter-spacing: -.055em;
+      text-shadow: none;
+    }
+
+    .identity-rule {
+      width: 58px;
+      height: 3px;
+      margin-top: 12px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #4ce0c2, #4089ff);
+      box-shadow: 0 0 14px rgba(76, 205, 187, .28);
+    }
+
+    .orb-identity {
+      display: grid;
+      justify-items: center;
+      gap: 13px;
+      margin: 0 auto 30px;
+    }
+
+    .logo-orb {
+      position: relative;
+      width: 92px;
+      height: 92px;
+      display: grid;
+      place-items: center;
+      background: transparent;
+    }
+
+    .logo-orb::before,
+    .logo-orb::after {
+      display: none;
+    }
+
+    .orb-identity .mark {
+      position: relative;
+      z-index: 1;
+      width: 88px;
+      height: 88px;
+      margin: 0;
+      border-radius: 24px;
+      filter: drop-shadow(0 8px 13px rgba(0, 0, 0, .4));
+    }
+
+    .orb-wordmark {
+      margin-left: .18em;
+      color: var(--home-text);
+      font-size: clamp(30px, 3vw, 38px);
+      font-weight: 600;
+      letter-spacing: .18em;
+      line-height: 1;
+    }
+
+    .orb-rule {
+      width: 46px;
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #4ce0c2, #4089ff);
+      box-shadow: 0 0 13px rgba(76, 205, 187, .3);
+    }
+
+    .search {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 9px 8px 22px;
+      min-height: 72px;
+      background: var(--home-panel);
+      border: 1px solid var(--home-border);
+      border-radius: 12px;
+      box-shadow: 0 16px 46px rgba(0, 0, .25);
+    }
+
+    .google-search-icon {
+      width: 22px;
+      height: 22px;
+      flex: 0 0 22px;
+      display: block;
+      margin-left: 1px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--home-text);
+      font: inherit;
+      font-size: 18px;
+    }
+
+    input::placeholder { color: var(--home-muted); }
+
+    button {
+      border: 0;
+      border-radius: 9px;
+      padding: 12px 19px;
+      background: var(--home-selection);
+      color: var(--home-text);
+      font: inherit;
+      font-weight: 400;
+      cursor: pointer;
+    }
+
+    button:hover { background: var(--home-panel-hover); }
+    .search:focus-within {
+      border-color: var(--home-border-strong);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, .3), 0 0 0 3px rgba(92, 131, 183, .12);
+    }
+    button:focus-visible { outline: 2px solid var(--home-border-strong); outline-offset: 2px; }
+
+    .suggestions {
+      max-height: 0;
+      margin-top: 0;
+      overflow: hidden;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: var(--home-panel);
+      box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+      opacity: 0;
+      pointer-events: none;
+      text-align: left;
+      visibility: hidden;
+    }
+
+    .suggestions.is-open {
+      max-height: 520px;
+      margin-top: 8px;
+      border-color: var(--home-border);
+      box-shadow: 0 14px 30px rgba(0, 0, 0, .24);
+      opacity: 1;
+      pointer-events: auto;
+      visibility: visible;
+    }
+
+    .suggestion-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      min-height: 46px;
+      padding: 10px 14px;
+      border: 0;
+      border-bottom: 1px solid var(--home-border);
+      border-radius: 0;
+      background: transparent;
+      color: var(--home-text);
+      text-align: left;
+      font-size: 14px;
+      font-weight: 400;
+    }
+
+    .suggestion-row:last-child { border-bottom: 0; }
+    .suggestion-row:hover { background: var(--home-panel-hover); }
+
+    .suggestion-kind {
+      margin-left: 16px;
+      color: var(--home-muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .search-hint {
+      min-height: 22px;
+      margin: 12px 12px 0;
+      color: var(--home-detail);
+      font-size: 13px;
+      text-align: left;
+    }
+
+    .search-hint[hidden] { display: none; }
+
+    .suggestion {
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      margin-left: 5px;
+      padding: 4px 9px;
+      border: 1px solid var(--home-border-strong);
+      border-radius: 9px;
+      background: var(--home-panel-hover);
+      color: var(--home-text);
+      font-size: 13px;
+      font-weight: 400;
+    }
+
+    .recent {
+      margin-top: 28px;
+      text-align: left;
+    }
+
+    .recent[hidden] { display: none; }
+    .recent.is-visible { opacity: 1; }
+
+    .section-label {
+      margin: 0 0 10px 4px;
+      color: var(--home-muted);
+      font-size: 12px;
+      font-weight: 400;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .recent-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .recent-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      padding: 13px 14px;
+      border: 1px solid var(--home-border);
+      border-radius: 14px;
+      background: var(--home-panel);
+      color: var(--home-text);
+      text-decoration: none;
+      opacity: 1;
+    }
+
+    .recent.is-visible .recent-card {
+      opacity: 1;
+    }
+
+    .recent-card:hover {
+      border-color: var(--home-border-strong);
+      background: var(--home-panel-hover);
+    }
+
+    .site-icon,
+    .site-icon-fallback {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
+      border-radius: 9px;
+    }
+
+    .site-icon {
+      display: block;
+      object-fit: contain;
+      background: var(--home-panel);
+    }
+
+    .site-icon-fallback {
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--home-selection), var(--home-accent));
+      color: var(--home-text);
+      font-weight: 400;
+    }
+
+    .site-icon-fallback[hidden],
+    .site-icon[hidden] { display: none; }
+
+    .recent-copy { min-width: 0; }
+
+    .recent-title,
+    .recent-url {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .recent-title {
+      margin-bottom: 5px;
+      font-weight: 400;
+    }
+
+    .recent-url {
+      color: var(--home-muted);
+      font-size: 12px;
+      font-family: "Slabo 13px", Georgia, serif;
+    }
+
+    .background-button {
+      position: fixed;
+      left: 22px;
+      bottom: 22px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 13px;
+      border: 1px solid var(--home-border);
+      border-radius: 10px;
+      background: var(--home-panel);
+      color: var(--home-muted);
+      font-size: 13px;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
+      z-index: 3;
+    }
+
+    .background-button:hover {
+      border-color: var(--home-border-strong);
+      color: var(--home-text);
+      background: var(--home-panel-hover);
+    }
+
+    .background-button svg {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+    }
+
+    .background-menu {
+      position: fixed;
+      left: 22px;
+      bottom: 66px;
+      z-index: 3;
+      display: grid;
+      gap: 3px;
+      min-width: 170px;
+      padding: 6px;
+      border: 1px solid var(--home-border);
+      border-radius: 12px;
+      background: var(--home-panel);
+      box-shadow: 0 16px 34px rgba(0, 0, 0, .28);
+    }
+
+    .background-menu[hidden] { display: none; }
+
+    .background-menu button {
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--home-text);
+      text-align: left;
+      font-size: 13px;
+    }
+
+    .background-menu button:hover {
+      background: var(--home-panel-hover);
+    }
+
+    @media (max-width: 680px) {
+      .logo-orb { width: 92px; height: 92px; }
+      .orb-identity .mark { width: 66px; height: 66px; border-radius: 20px; }
+      .home-identity { gap: 13px; padding: 8px 16px 8px 8px; border-radius: 17px; }
+      .identity-mark { width: 62px; height: 62px; flex-basis: 62px; border-radius: 13px; }
+      .home-identity .mark { width: 56px; height: 56px; border-radius: 15px; }
+      .home-identity h1 { font-size: 40px; }
+      .brand { gap: 13px; }
+      .brand-mark { width: 70px; height: 70px; flex-basis: 70px; border-radius: 23px; }
+      .brand .mark { width: 58px; height: 58px; border-radius: 18px; }
+      .brand h1 { font-size: 38px; }
+      .recent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .search { padding-left: 16px; }
+      .search button { padding-inline: 14px; }
+    }
+    @media (max-height: 650px) {
+      .orb-identity { gap: 10px; margin-bottom: 22px; }
+      .logo-orb { width: 88px; height: 88px; }
+      .orb-identity .mark { width: 64px; height: 64px; border-radius: 20px; margin: 0; }
+      .home-identity { margin-bottom: 22px; padding: 7px 17px 7px 7px; }
+      .identity-mark { width: 62px; height: 62px; flex-basis: 62px; }
+      .home-identity .mark { width: 56px; height: 56px; border-radius: 15px; margin: 0; }
+      .identity-rule { margin-top: 8px; }
+      .brand { margin-bottom: 22px; }
+      .brand-mark { width: 68px; height: 68px; flex-basis: 68px; border-radius: 22px; }
+      .brand .mark { width: 56px; height: 56px; border-radius: 17px; margin: 0; }
+      .brand-subtitle { margin-top: 4px; }
+      .mark { width: 82px; height: 82px; border-radius: 26px; margin-bottom: 14px; }
+      h1 { font-size: 38px; margin-bottom: 22px; }
+      .search { min-height: 62px; }
+      .recent { margin-top: 20px; }
+    }
+
+  </style>
+</head>
+<body>
+  <div id="background-layer" aria-hidden="true"></div>
+  <main>
+    <header class="orb-identity" aria-label="Tugle home">
+      <div class="logo-orb">
+        <img class="mark" src="assets/tugle-icon.png" alt="">
+      </div>
+      <div class="orb-wordmark">TUGLE</div>
+    </header>
+
+    <form class="search" onsubmit="go(event)">
+      <svg class="google-search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="#4285F4" d="M21.35 12.27c0-.71-.06-1.4-.18-2.05H12v3.88h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.22z"/>
+        <path fill="#34A853" d="M12 21.5c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.92-3.31.92-2.54 0-4.69-1.72-5.46-4.03H3.3v2.53A9.74 9.74 0 0 0 12 21.5z"/>
+        <path fill="#FBBC05" d="M6.54 13.58A5.86 5.86 0 0 1 6.23 12c0-.55.1-1.08.31-1.58V7.89H3.3A9.75 9.75 0 0 0 2.25 12c0 1.57.38 3.05 1.05 4.11l3.24-2.53z"/>
+        <path fill="#EA4335" d="M12 6.39c1.43 0 2.71.49 3.72 1.45l2.79-2.79C16.84 3.48 14.63 2.5 12 2.5a9.74 9.74 0 0 0-8.7 5.39l3.24 2.53A5.84 5.84 0 0 1 12 6.39z"/>
+      </svg>
+      <input id="q" autocomplete="off" placeholder="Search the web" autofocus>
+      <button type="submit">Search</button>
+    </form>
+
+    <div id="suggestions" class="suggestions" aria-hidden="true"></div>
+
+    <section id="recent" class="recent" hidden>
+      <div class="section-label">Recent sites</div>
+      <div id="recent-grid" class="recent-grid"></div>
+    </section>
+  </main>
+
+  <button id="customize-background" class="background-button" type="button" title="Customize background">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 16.5 14.5 7l2.5 2.5-9.5 9.5H5v-2.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+      <path d="m13.5 8 2.5-2.5a1.4 1.4 0 0 1 2 0l1 1a1.4 1.4 0 0 1 0 2L16.5 11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      <path d="M4 20h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    Customize background
+  </button>
+  <div id="background-menu" class="background-menu" hidden>
+    <button type="button" data-background-action="solid">Solid color</button>
+    <button type="button" data-background-action="gradient">Gradient</button>
+    <button type="button" data-background-action="image">Picture</button>
+    <button type="button" data-background-action="video">Video</button>
+    <button type="button" data-background-action="reset">Reset background</button>
+  </div>
+
+  <script>
+    const homeData = { visits: [], searches: [] };
+    const query = document.getElementById("q");
+    const backgroundButton = document.getElementById("customize-background");
+    const backgroundMenu = document.getElementById("background-menu");
+    const backgroundLayer = document.getElementById("background-layer");
+    let googleSuggestions = [];
+    let googleRequestTimer;
+
+    window.tugleSetTheme = function(theme) {
+      const root = document.documentElement;
+      if (!theme) return;
+      for (const [key, value] of Object.entries(theme)) {
+        if (typeof value === "string" && value.startsWith("#"))
+          root.style.setProperty(
+            key === "background"
+              ? "--home-bg"
+              : "--home-" + key.replace(/[A-Z]/g, match => "-" + match.toLowerCase()),
+            value);
+      }
+
+      backgroundLayer.replaceChildren();
+      backgroundLayer.style.background =
+        theme.backgroundMode === "gradient"
+          ? `linear-gradient(135deg, ${theme.background}, ${theme.backgroundSecondary || theme.accent})`
+          : "var(--home-bg)";
+
+      if (theme.backgroundMode === "image" && theme.backgroundMedia) {
+        const image = document.createElement("img");
+        image.alt = "";
+        image.src = theme.backgroundMedia;
+        backgroundLayer.appendChild(image);
+      } else if (theme.backgroundMode === "video" && theme.backgroundMedia) {
+        const video = document.createElement("video");
+        video.autoplay = true;
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.src = theme.backgroundMedia;
+        backgroundLayer.appendChild(video);
+        video.play().catch(() => {});
+      }
+    };
+
+    backgroundButton.addEventListener("click", () => {
+      backgroundMenu.hidden = !backgroundMenu.hidden;
+    });
+
+    backgroundMenu.addEventListener("click", event => {
+      const action = event.target.closest("[data-background-action]")?.dataset.backgroundAction;
+      if (!action) return;
+      backgroundMenu.hidden = true;
+      if (window.chrome?.webview) window.chrome.webview.postMessage("tugle:background:" + action);
+    });
+
+    // The entire home search surface should feel like one input.  This keeps
+    // clicks on its padding, icon, and outer edges from being dead space.
+    document.querySelector(".search").addEventListener("pointerdown", event => {
+      if (event.target.closest("button")) return;
+      requestAnimationFrame(() => query.focus());
+    });
+
+    document.addEventListener("click", event => {
+      if (!backgroundMenu.hidden && !backgroundMenu.contains(event.target) && event.target !== backgroundButton)
+        backgroundMenu.hidden = true;
+    });
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[character]));
+    }
+
+    function hostFromUrl(url) {
+      try { return new URL(url).hostname.replace(/^www\./, ""); }
+      catch { return url; }
+    }
+
+    function iconUrlForVisit(visit) {
+      if (visit.IconUrl) return visit.IconUrl;
+      try { return new URL("/favicon.ico", visit.Url).href; }
+      catch { return ""; }
+    }
+
+    function renderRecent() {
+      const section = document.getElementById("recent");
+      const grid = document.getElementById("recent-grid");
+      grid.innerHTML = "";
+
+      if (!homeData.visits.length) {
+        section.hidden = true;
+        section.classList.remove("is-visible");
+        return;
+      }
+
+      for (const visit of homeData.visits) {
+        const card = document.createElement("a");
+        card.className = "recent-card";
+        card.style.setProperty("--card-index", grid.children.length);
+        card.href = visit.Url;
+
+        const icon = document.createElement("img");
+        icon.className = "site-icon";
+        icon.alt = "";
+        icon.loading = "lazy";
+        icon.referrerPolicy = "no-referrer";
+        icon.src = iconUrlForVisit(visit);
+
+        const fallback = document.createElement("span");
+        fallback.className = "site-icon-fallback";
+        fallback.hidden = true;
+        fallback.textContent = hostFromUrl(visit.Url).slice(0, 1).toUpperCase();
+
+        icon.onerror = () => {
+          icon.hidden = true;
+          fallback.hidden = false;
+        };
+
+        const copy = document.createElement("div");
+        copy.className = "recent-copy";
+
+        const title = document.createElement("div");
+        title.className = "recent-title";
+        title.textContent = visit.Title || hostFromUrl(visit.Url);
+
+        const url = document.createElement("div");
+        url.className = "recent-url";
+        url.textContent = hostFromUrl(visit.Url);
+
+        copy.append(title, url);
+        card.append(icon, fallback, copy);
+        grid.appendChild(card);
+      }
+      section.hidden = false;
+      section.classList.add("is-visible");
+    }
+
+    function renderSuggestions() {
+      const value = query.value.trim();
+      const suggestions = document.getElementById("suggestions");
+      suggestions.innerHTML = "";
+
+      if (!value) {
+        suggestions.classList.remove("is-open");
+        suggestions.setAttribute("aria-hidden", "true");
+        return;
+      }
+
+      const lowered = value.toLowerCase();
+      const matches = homeData.searches
+        .filter(item => item.toLowerCase().includes(lowered))
+        .slice(0, 4);
+      const remoteMatches = googleSuggestions
+        .filter(item => item.toLowerCase().includes(lowered))
+        .filter(item => !matches.some(match => match.toLowerCase() === item.toLowerCase()))
+        .slice(0, 5);
+
+      for (const item of matches) {
+        appendSuggestion(item, "Recent search");
+      }
+
+      for (const item of remoteMatches) {
+        appendSuggestion(item, "Google suggestion");
+      }
+
+      if (!matches.some(item => item.toLowerCase() === lowered)) {
+        appendSuggestion(value, "Search Google");
+      }
+
+      suggestions.classList.add("is-open");
+      suggestions.setAttribute("aria-hidden", "false");
+    }
+
+    function appendSuggestion(value, kind) {
+      const suggestions = document.getElementById("suggestions");
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "suggestion-row";
+      row.style.setProperty("--suggestion-index", suggestions.children.length);
+      row.innerHTML = `<span>${escapeHtml(value)}</span><span class="suggestion-kind">${escapeHtml(kind)}</span>`;
+      row.addEventListener("click", () => {
+        query.value = value;
+        go({ preventDefault() {} });
+      });
+      suggestions.appendChild(row);
+    }
+
+    function requestGoogleSuggestions() {
+      clearTimeout(googleRequestTimer);
+      googleSuggestions = [];
+      const value = query.value.trim();
+      renderSuggestions();
+
+      if (!value || value.length > 120 || !window.chrome?.webview) return;
+
+      googleRequestTimer = setTimeout(() => {
+        window.chrome.webview.postMessage("tugle:google-autocomplete:" + value);
+      }, 180);
+    }
+
+    window.tugleApplyGoogleSuggestions = function(result) {
+      if (!result || result.query !== query.value.trim() || !Array.isArray(result.suggestions)) return;
+      googleSuggestions = result.suggestions
+        .filter(item => typeof item === "string")
+        .map(item => item.trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      renderSuggestions();
+    };
+
+    window.tugleSetData = function(data) {
+      homeData.visits = Array.isArray(data?.visits) ? data.visits : [];
+      homeData.searches = Array.isArray(data?.searches) ? data.searches : [];
+      renderRecent();
+      renderSuggestions();
+    };
+
+    query.addEventListener("input", requestGoogleSuggestions);
+    query.addEventListener("focus", renderSuggestions);
+
+    function go(event) {
+      event.preventDefault();
+      const value = query.value.trim();
+      if (value) window.location.href = "https://www.google.com/search?q=" + encodeURIComponent(value);
+    }
+  </script>
+</body>
+</html>

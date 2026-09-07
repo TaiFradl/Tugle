@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>assets\tugle-icon.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Tugle</AssemblyName>
+    <RootNamespace>Tugle</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3485.44" />
+    <Content Include="TugleHome.html" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="TugleSetup.html" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\tugle-icon.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\tugle-icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\Slabo13px-Regular.ttf" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\Slabo13px-OFL.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\ublock\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\cookie-guard\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
