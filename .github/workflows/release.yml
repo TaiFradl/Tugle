@@ -16,13 +16,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - name: Build portable Windows package
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+      - name: Build Windows packages
         shell: pwsh
         run: |
-          dotnet publish Tugle.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o publish/Tugle
+          $version = "${{ github.ref_name }}".TrimStart('v', 'V')
+          .\installer\build-installer.ps1 -Version $version
           Compress-Archive -Path publish/Tugle -DestinationPath Tugle-browser.zip -CompressionLevel Optimal
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create "${{ github.ref_name }}" Tugle-browser.zip --title "Tugle ${{ github.ref_name }}" --notes-file CHANGELOG.md
+        run: gh release create "${{ github.ref_name }}" Tugle-browser.zip artifacts\Tugle-Setup.exe --title "Tugle ${{ github.ref_name }}" --notes-file RELEASE_NOTES.md --latest --verify-tag

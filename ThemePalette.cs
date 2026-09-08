@@ -221,7 +221,8 @@ internal static class ThemePalettes
         ThemePalette.FromAccent("Gold", "Golden yellow", Color.FromArgb(240, 210, 100)),
         Forest,
         ThemePalette.FromAccent("Cyan", "Clear cyan", Color.FromArgb(97, 230, 230)),
-        ThemePalette.FromAccent("Coral", "Warm coral", Color.FromArgb(255, 139, 122))
+        ThemePalette.FromAccent("Coral", "Warm coral", Color.FromArgb(255, 139, 122)),
+        ThemePalette.FromAccent("Slate", "Soft silver on charcoal", Color.FromArgb(174, 187, 204))
     ];
 
     public static IReadOnlyList<ThemePalette> All { get; } = [Ocean, Violet, Forest, Ember];

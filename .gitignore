@@ -1,6 +1,8 @@
 bin/
 obj/
 exe/
+publish/
+artifacts/
 work/
 Documents - Shortcut.lnk
 *.user

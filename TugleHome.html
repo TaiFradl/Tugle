@@ -619,7 +619,7 @@
     <div id="suggestions" class="suggestions" aria-hidden="true"></div>
 
     <section id="recent" class="recent" hidden>
-      <div class="section-label">Recent sites</div>
+      <div class="section-label">Most used sites</div>
       <div id="recent-grid" class="recent-grid"></div>
     </section>
   </main>
@@ -648,10 +648,15 @@
     const backgroundLayer = document.getElementById("background-layer");
     let googleSuggestions = [];
     let googleRequestTimer;
+    let lastThemeJson = "";
+    let lastDataJson = "";
 
     window.tugleSetTheme = function(theme) {
       const root = document.documentElement;
       if (!theme) return;
+      const json = JSON.stringify(theme);
+      if (json === lastThemeJson) return;
+      lastThemeJson = json;
       for (const [key, value] of Object.entries(theme)) {
         if (typeof value === "string" && value.startsWith("#"))
           root.style.setProperty(
@@ -680,9 +685,16 @@
         video.playsInline = true;
         video.src = theme.backgroundMedia;
         backgroundLayer.appendChild(video);
-        video.play().catch(() => {});
+        if (!document.hidden) video.play().catch(() => {});
       }
     };
+
+    document.addEventListener("visibilitychange", () => {
+      const video = backgroundLayer.querySelector("video");
+      if (!video) return;
+      if (document.hidden) video.pause();
+      else video.play().catch(() => {});
+    });
 
     backgroundButton.addEventListener("click", () => {
       backgroundMenu.hidden = !backgroundMenu.hidden;
@@ -851,6 +863,9 @@
     };
 
     window.tugleSetData = function(data) {
+      const json = JSON.stringify(data);
+      if (json === lastDataJson) return;
+      lastDataJson = json;
       homeData.visits = Array.isArray(data?.visits) ? data.visits : [];
       homeData.searches = Array.isArray(data?.searches) ? data.searches : [];
       renderRecent();

@@ -17,7 +17,6 @@ internal sealed class FirstRunSetupForm : Form
     private readonly Dictionary<string, string> _media = new();
     private ThemePalette? _customTheme;
     public bool ConnectGoogle { get; private set; }
-    public bool UseSiteColors { get; private set; }
     public ThemePalette SelectedTheme { get; private set; } = ThemePalettes.Ocean;
     public string SelectedThemeName => SelectedTheme.Name;
     public string? SelectedBackgroundMediaUrl { get; private set; }
@@ -25,11 +24,10 @@ internal sealed class FirstRunSetupForm : Form
     public Color SelectedBackground { get; private set; } = Color.FromArgb(7, 21, 38);
     public Color SelectedBackgroundSecondary { get; private set; } = Color.FromArgb(32, 61, 91);
 
-    public FirstRunSetupForm(Func<Task<CoreWebView2Environment>> getEnvironment, ThemePalette initialTheme, bool useSiteColors)
+    public FirstRunSetupForm(Func<Task<CoreWebView2Environment>> getEnvironment, ThemePalette initialTheme)
     {
         _getEnvironment = getEnvironment;
         SelectedTheme = initialTheme;
-        UseSiteColors = useSiteColors;
         if (initialTheme.Name == "Custom") _customTheme = initialTheme;
         var palette = initialTheme;
         _view.DefaultBackgroundColor = palette.ContentBackground;
@@ -172,7 +170,7 @@ internal sealed class FirstRunSetupForm : Form
             switch (root.GetProperty("action").GetString())
             {
                 case "ready":
-                    Post(new { type = "themes", themes = ThemePalettes.ColorOptions.Select(PaletteData), custom = _customTheme is null ? null : PaletteData(_customTheme), selected = UseSiteColors ? "Site colors" : SelectedThemeName });
+                    Post(new { type = "themes", themes = ThemePalettes.ColorOptions.Select(PaletteData), custom = _customTheme is null ? null : PaletteData(_customTheme), selected = SelectedThemeName });
                     ConnectGoogle = await GoogleSession.IsConnectedAsync(_view.CoreWebView2);
                     if (!IsDisposed) Post(new { type = "account", connected = ConnectGoogle, initial = true });
                     break;
@@ -181,7 +179,6 @@ internal sealed class FirstRunSetupForm : Form
                     break;
                 case "theme":
                     var name = root.GetProperty("name").GetString();
-                    UseSiteColors = name == "Site colors";
                     var selected = FindTheme(name);
                     if (selected is not null) { SelectedTheme = selected; UpdateTitleColor(); }
                     break;
@@ -217,8 +214,7 @@ internal sealed class FirstRunSetupForm : Form
                     break;
                 case "finish":
                     var themeName = root.GetProperty("theme").GetString();
-                    UseSiteColors = themeName == "Site colors";
-                    var finishTheme = UseSiteColors ? ThemePalettes.Ocean : FindTheme(themeName);
+                    var finishTheme = FindTheme(themeName);
                     if (finishTheme is null) return;
                     var background = root.GetProperty("background");
                     var mode = background.GetProperty("mode").GetString();

@@ -9,22 +9,26 @@ Tugle is a lightweight Windows browser with a focused, custom interface.
 - Address bar that accepts URLs or search text
 - Back, forward, reload, and home buttons
 - History menu with the 12 most recent visits (`Ctrl+H`)
-- GUI-scale menu for compact through large browser chrome (80% to 120%)
-- Downloads menu with active and completed-download status (`Ctrl+J`)
+- Searchable local bookmarks with editing, removal, and open-in-new-tab controls (`Ctrl+D` saves the current page). Former Read later links remain available as bookmarks.
+- Pinned tabs and recently closed tabs (`Ctrl+Shift+T`)
+- GUI-scale menu for compact through large browser chrome (70% to 140%)
+- Downloads menu with progress plus pause, resume, and cancel controls when the runtime supports them (`Ctrl+J`)
+- Private windows (`Ctrl+Shift+N`), browser-data cleanup, tracking-prevention levels, and visible blocker status
+- PDF saving (`Ctrl+P`) and configurable address-bar search
 - Accounts panel with Google sign-in handoff and connection status
 - Update checks through GitHub Releases
 - Three-step first-run setup: Google account, theme, and background
 - Persistent settings and a persistent WebView2 profile across restarts
 - A clean Tugle start page
 - A privacy indicator
-- A safe built-in blocker for dedicated advertising hosts
-- Match site colors in setup and the Theme menu
+- Full uBlock Origin filtering with a conservative built-in fallback
+- Saved custom theme colors
 
 The start page is stored locally in `TugleHome.html` and loaded as a normal page. This avoids injecting a large image-embedded HTML string into WebView2, which caused the earlier blank-page bug.
 
-## Search engine: Google
+## Search engine
 
-Google is the current search destination. Tugle does not have its own search engine yet, so text that is not a URL is sent to Google. Direct URLs still open directly. The search provider can be made configurable later.
+Text that is not a URL is sent to the selected search provider. Accounts → Search engine lets you choose Google, DuckDuckGo, Bing, Brave, or a custom HTTP(S) URL containing `{query}`. Direct URLs still open directly.
 
 The search behavior is in `MainForm.cs`, inside `NavigateFromAddressBar()`.
 
@@ -47,13 +51,13 @@ The first-run setup stores its choices in `%LOCALAPPDATA%\Tugle\settings.json`. 
 
 Tugle starts maximized and supports native Windows snapping, resizing, and the maximize-button Snap Layouts menu. F11 toggles taskbar-covering fullscreen and restores the previous window state. Setup starts maximized with standard Windows window controls. Its Google → Theme → Background steps keep one kind of choice on each page, with a live home-page preview beside the current controls or above them in narrower windows.
 
-Setup version 7 uses the main browser palette, Tugle branding, and minimal text. Theme has its own page with named color choices, **Match site colors**, and a custom color picker. Background has its own page with Color, Gradient, Picture, and Video options beside a live home-page preview. Custom theme accents, site-color mode, and selected media paths persist across restarts. Closing setup leaves it incomplete so it appears again on next launch. Done saves appearance before opening the home page. Existing history and website sessions are preserved.
+Setup version 7 uses the main browser palette, Tugle branding, and minimal text. Theme has its own page with named color choices and a custom color picker. Background has its own page with Color, Gradient, Picture, and Video options beside a live home-page preview. Custom theme accents and selected media paths persist across restarts. Closing setup leaves it incomplete so it appears again on next launch. Done saves appearance before opening the home page. Existing history and website sessions are preserved.
 
 Google sign-in opens in the system browser instead of an embedded WebView. Setup provides an explicit Continue button after the user returns. Existing Google sessions already present in Tugle are recognized, but system-browser cookies are intentionally not copied into WebView2. Full Google account linking would require a registered OAuth desktop client and is not claimed by this handoff. No Google password is collected by setup.
 
-Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. A newer release offers its portable ZIP download; the same check is available from Accounts → Check for updates.
+Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. Installed copies download a newer Windows installer in the background and ask to restart when it is ready; the installer closes Tugle, preserves the profile, and launches the updated app. Portable copies open the release download instead, since a running portable folder cannot safely replace itself. The same check is available from Settings → Check for updates.
 
-Pushing a tag such as `v1.0.1` builds and publishes `Tugle-browser.zip` through the GitHub Actions release workflow.
+Pushing a tag such as `v1.2.1` builds and publishes both `Tugle-Setup.exe` and `Tugle-browser.zip` through the GitHub Actions release workflow. Update `RELEASE_NOTES.md` before tagging.
 
 For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separate profile folder. Settings, history, and WebView2 data then use that folder. Leave it unset for normal use.
 
@@ -61,9 +65,15 @@ For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separa
 
 The Accounts toolbar button opens Google in the system browser and shows the account panel when you return. Tugle does not collect or store a Google password. Existing sessions inside Tugle are detected from its own WebView2 profile; system-browser cookies are not copied into Tugle. A future sync service would need an explicit provider and separate encryption design.
 
-## Site colors and ad blocking
+## Ad blocking
 
-Match site colors safely changes Tugle’s accent using a site’s declared theme color, or a stable fallback color for that site. The home page uses the selected base theme. The built-in blocker never blocks a page document and only filters a short list of dedicated advertising hosts. It is not a full filter-list engine.
+Tugle loads its packaged uBlock Origin extension for filter-list based blocking. If a WebView2 runtime cannot load extensions, the browser still blocks requests to a conservative list of dedicated advertising hosts and never blocks page documents.
+
+## Launching Tugle
+
+Run `Tugle-Setup.exe` for the normal installation. It installs Tugle for the current Windows user, adds a Start-menu shortcut, and creates a desktop shortcut by default. It does not delete `%LOCALAPPDATA%\Tugle`, so an upgrade or uninstall keeps the user’s settings, tab session, history, and WebView2 website data.
+
+The portable ZIP remains available for people who prefer to run Tugle without installing it. Windows requires the user to choose taskbar pinning; after installation, right-click Tugle in Start and choose **Pin to taskbar** if wanted.
 
 ## Design
 
@@ -83,14 +93,15 @@ dotnet run --project .\\Tugle.csproj
 
 Microsoft Edge WebView2 Runtime must be installed on the computer.
 
+## Regression checks
+
+Run `dotnet run --project tests/Tugle.Checks.csproj -- --live` on Windows. The checks use a fresh temporary profile and a local test server, validate bookmark migration and visit counts, render chrome at 70%, 90%, and 140%, and exercise real WebView2 audio, deferred session restoration, Home, and setup. Test audio is muted. PNG previews are saved under `tests/bin/Debug/net8.0-windows/renders`.
+
 ## Current limitations
 
-- Tabs are not restored after restarting Tugle
-- No bookmarks or full-history page yet
-- No filter-list updater yet
-- No installer yet
-- No custom search-engine setting yet
+- Bookmarks, most-used site counts, and tab sessions are local-only; there is no sync service.
+- The small built-in blocker fallback covers dedicated advertising hosts only when the packaged uBlock extension cannot load.
 
 ## Next sensible step
 
-Polish the toolbar and start page after visual feedback, then replace the small host list with a maintained filter-list system while measuring memory use against Edge.
+Polish the toolbar and start page after visual feedback, then add a filter-list updater while measuring memory use against Edge.

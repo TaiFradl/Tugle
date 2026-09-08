@@ -8,12 +8,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Tugle</AssemblyName>
     <RootNamespace>Tugle</RootNamespace>
-    <Version>1.0.1</Version>
-    <AssemblyVersion>1.0.1.0</AssemblyVersion>
-    <FileVersion>1.0.1.0</FileVersion>
+    <Version>1.2.1</Version>
+    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <FileVersion>1.2.1.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3485.44" />
     <Content Include="TugleHome.html" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TugleSetup.html" CopyToOutputDirectory="PreserveNewest" />
@@ -22,5 +23,6 @@
     <Content Include="assets\Slabo13px-Regular.ttf" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="assets\Slabo13px-OFL.txt" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="assets\cookie-guard\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets\ublock\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
