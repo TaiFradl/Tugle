@@ -42,7 +42,7 @@ internal sealed class HistoryStore : IDisposable
             if (!File.Exists(_filePath)) return;
             var data = JsonSerializer.Deserialize<HistoryData>(File.ReadAllText(_filePath), JsonOptions);
             if (data is null) return;
-            foreach (var visit in data.Visits.Where(item => !IsGoogleSearchUrl(item.Url)))
+            foreach (var visit in data.Visits.Where(item => SearchProvider.GetQuery(item.Url) is null))
             {
                 if (_visits.Any(existing => string.Equals(existing.Url, visit.Url, StringComparison.OrdinalIgnoreCase)))
                     continue;
@@ -147,7 +147,7 @@ internal sealed class HistoryStore : IDisposable
         key = string.Empty;
         uri = null!;
         if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
-            parsed.Scheme is not ("http" or "https") || IsGoogleSearchUrl(parsed)) return false;
+            parsed.Scheme is not ("http" or "https") || SearchProvider.GetQuery(url) is not null) return false;
         uri = parsed;
         key = uri.IdnHost.StartsWith("www.", StringComparison.OrdinalIgnoreCase) ? uri.IdnHost[4..] : uri.IdnHost;
         if (!uri.IsDefaultPort) key += ":" + uri.Port;
@@ -162,17 +162,6 @@ internal sealed class HistoryStore : IDisposable
         if (_searches.Count > 200)
             _searches.Remove(_searches.MinBy(pair => pair.Value).Key);
         Save();
-    }
-
-    private static bool IsGoogleSearchUrl(string url)
-    {
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri) && IsGoogleSearchUrl(uri);
-    }
-
-    private static bool IsGoogleSearchUrl(Uri uri)
-    {
-        return (uri.Host.Equals("google.com", StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith(".google.com", StringComparison.OrdinalIgnoreCase)) &&
-            uri.AbsolutePath.Equals("/search", StringComparison.OrdinalIgnoreCase);
     }
 
     private void Save()

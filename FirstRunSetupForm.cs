@@ -11,6 +11,7 @@ internal sealed class FirstRunSetupForm : Form
     public const int CurrentVersion = 7;
     private readonly WebView2 _view = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(248, 249, 252) };
     private readonly Func<Task<CoreWebView2Environment>> _getEnvironment;
+    private readonly Func<CoreWebView2, Task>? _prepareProtection;
     private readonly string _pageUrl = new Uri(Path.Combine(AppContext.BaseDirectory, "TugleSetup.html")).AbsoluteUri;
     private bool _signingIn;
     private bool _picking;
@@ -24,9 +25,13 @@ internal sealed class FirstRunSetupForm : Form
     public Color SelectedBackground { get; private set; } = Color.FromArgb(7, 21, 38);
     public Color SelectedBackgroundSecondary { get; private set; } = Color.FromArgb(32, 61, 91);
 
-    public FirstRunSetupForm(Func<Task<CoreWebView2Environment>> getEnvironment, ThemePalette initialTheme)
+    public FirstRunSetupForm(
+        Func<Task<CoreWebView2Environment>> getEnvironment,
+        ThemePalette initialTheme,
+        Func<CoreWebView2, Task>? prepareProtection = null)
     {
         _getEnvironment = getEnvironment;
+        _prepareProtection = prepareProtection;
         SelectedTheme = initialTheme;
         if (initialTheme.Name == "Custom") _customTheme = initialTheme;
         var palette = initialTheme;
@@ -139,6 +144,8 @@ internal sealed class FirstRunSetupForm : Form
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.AreDevToolsEnabled = false;
+            if (_prepareProtection is not null)
+                _ = PrepareProtectionSafelyAsync(core);
             core.NavigationStarting += (_, e) => { if (e.Uri != _pageUrl) e.Cancel = true; };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.WebMessageReceived += ReceiveMessage;
@@ -149,6 +156,18 @@ internal sealed class FirstRunSetupForm : Form
             if (IsDisposed) return;
             MessageBox.Show(this, "Setup could not start. Please reopen Tugle to try again.\n\n" + ex.Message, "Tugle setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Close();
+        }
+    }
+
+    private async Task PrepareProtectionSafelyAsync(CoreWebView2 core)
+    {
+        try
+        {
+            await _prepareProtection!(core);
+        }
+        catch
+        {
+            // Protection preparation is optional and must never hold up setup.
         }
     }
 
@@ -196,18 +215,15 @@ internal sealed class FirstRunSetupForm : Form
                     _signingIn = true;
                     try
                     {
-                        using var signIn = new GoogleExternalSignInForm();
+                        using var signIn = new GoogleSignInForm(await _getEnvironment(), SelectedTheme);
                         signIn.ShowDialog(this);
-                        // The system browser keeps its own cookie jar. Only report a
-                        // real Tugle session as connected; the handoff itself never
-                        // pretends to authenticate the app.
                         ConnectGoogle = await GoogleSession.IsConnectedAsync(_view.CoreWebView2);
                         if (!IsDisposed)
                             _view.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
                             {
                                 type = "account",
                                 connected = ConnectGoogle,
-                                message = signIn.Returned ? "Return to Tugle to continue" : ""
+                                message = signIn.Blocked ? "Google blocked sign-in. You can skip this step." : ""
                             }));
                     }
                     finally { _signingIn = false; }
@@ -248,6 +264,22 @@ internal sealed class FirstRunSetupForm : Form
 
 internal static class GoogleSession
 {
+    internal const string SignInUrl = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F";
+    internal static bool IsGoogleCookieDomain(string domain) =>
+        domain.TrimStart('.').Equals("google.com", StringComparison.OrdinalIgnoreCase) ||
+        domain.EndsWith(".google.com", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsAccountUrl(string? source) => Uri.TryCreate(source, UriKind.Absolute, out var uri) &&
+        uri.Scheme == "https" && uri.Host.Equals("accounts.google.com", StringComparison.OrdinalIgnoreCase);
+
+    internal static async Task<bool> IsSignInBlockedAsync(CoreWebView2 core)
+    {
+        if (!IsAccountUrl(core.Source)) return false;
+        // Read only an error flag, never credentials or page contents.
+        var flag = await core.ExecuteScriptAsync("/disallowed_useragent|browser or app may not be secure/i.test(document.body?.innerText || '')");
+        return flag == "true";
+    }
+
     internal static bool IsGoogleUrl(string? source) =>
         Uri.TryCreate(source, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
         (uri.Host.Equals("google.com", StringComparison.OrdinalIgnoreCase) ||
@@ -260,57 +292,75 @@ internal static class GoogleSession
         return cookies.Any(c => (c.Name is "SID" or "__Secure-1PSID" or "__Secure-3PSID") &&
             !string.IsNullOrWhiteSpace(c.Value) && (c.IsSession || c.Expires > DateTime.UtcNow));
     }
+
+    internal static async Task<bool> ClearCookiesAsync(CoreWebView2 core)
+    {
+        var cookies = await core.CookieManager.GetCookiesAsync(null);
+        foreach (var cookie in cookies.Where(cookie => IsGoogleCookieDomain(cookie.Domain)))
+            core.CookieManager.DeleteCookie(cookie);
+        // Deletion is queued in the browser process. Wait briefly for its result
+        // instead of showing stale connection state immediately after sign-out.
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            await Task.Delay(100);
+            if (!await IsConnectedAsync(core)) return true;
+        }
+        return false;
+    }
 }
 
-internal sealed class GoogleExternalSignInForm : Form
+internal sealed class GoogleSignInForm : Form
 {
-    private const string SignInUrl = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F&service=accountsettings";
-    public bool Returned { get; private set; }
+    public bool Blocked { get; private set; }
 
-    public GoogleExternalSignInForm()
+    public GoogleSignInForm(CoreWebView2Environment environment, ThemePalette theme)
     {
         Text = "Google sign-in · Tugle";
         StartPosition = FormStartPosition.CenterParent;
-        Size = new Size(460, 230);
-        MinimumSize = new Size(420, 210);
+        Size = new Size(960, 760);
+        MinimumSize = new Size(560, 500);
         Font = new Font("Segoe UI", 10);
-        BackColor = Color.FromArgb(24, 29, 40);
-        ForeColor = Color.FromArgb(235, 240, 248);
-        var message = new Label
+        BackColor = theme.Chrome;
+        ForeColor = theme.Text;
+        var status = new Label
         {
-            Dock = DockStyle.Fill,
-            Text = "Google opened in your browser.\nReturn here when you are done.",
+            Dock = DockStyle.Top, Height = 42,
+            Text = "Sign in to Google websites in Tugle",
             TextAlign = ContentAlignment.MiddleCenter,
-            Padding = new Padding(24),
-            Font = new Font("Segoe UI", 11)
+            BackColor = theme.Chrome, ForeColor = theme.Text
         };
-        var footer = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Bottom,
-            Height = 62,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            Padding = new Padding(10),
-            BackColor = Color.FromArgb(24, 29, 40)
-        };
-        var done = new Button { Text = "Continue", Width = 110, Height = 36, FlatStyle = FlatStyle.Flat };
-        var cancel = new Button { Text = "Back", Width = 90, Height = 36, FlatStyle = FlatStyle.Flat };
-        done.Click += (_, _) => { Returned = true; DialogResult = DialogResult.OK; Close(); };
-        cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
-        footer.Controls.Add(done);
-        footer.Controls.Add(cancel);
-        Controls.Add(message);
-        Controls.Add(footer);
-        Shown += (_, _) =>
+        var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = theme.ContentBackground };
+        Controls.Add(view);
+        Controls.Add(status);
+        Shown += async (_, _) =>
         {
             try
             {
-                Process.Start(new ProcessStartInfo { FileName = SignInUrl, UseShellExecute = true });
+                await view.EnsureCoreWebView2Async(environment);
+                if (IsDisposed) return;
+                var core = view.CoreWebView2;
+                core.Settings.IsStatusBarEnabled = false;
+                core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark;
+                core.NavigationCompleted += async (_, _) =>
+                {
+                    try
+                    {
+                        if (IsDisposed || !GoogleSession.IsGoogleUrl(core.Source)) return;
+                        if (await GoogleSession.IsConnectedAsync(core))
+                        {
+                            if (!IsDisposed) BeginInvoke((Action)(() => { DialogResult = DialogResult.OK; Close(); }));
+                            return;
+                        }
+                        Blocked = await GoogleSession.IsSignInBlockedAsync(core);
+                        if (!IsDisposed) status.Text = Blocked ? "Google blocked sign-in in this embedded browser. Close this window to skip." : "Sign in to Google websites in Tugle";
+                    }
+                    catch { /* The sign-in window may have closed during navigation. */ }
+                };
+                core.Navigate(GoogleSession.SignInUrl);
             }
             catch
             {
-                message.Text = "Could not open Google.\nClose this window and try again.";
-                done.Enabled = false;
+                if (!IsDisposed) status.Text = "Google could not load. Close this window to try again later.";
             }
         };
     }

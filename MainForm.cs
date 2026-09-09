@@ -51,13 +51,16 @@ public sealed class MainForm : SnapWindowForm
     private readonly RoundedSurface _addressSurface = new();
     private readonly ToolTip _tooltips = new();
     private readonly Panel _contentHost = new();
+    private readonly Panel _splitDivider = new();
     private readonly Panel _tabsFlow = new();
     private readonly FlowLayoutPanel _navigation = new();
     private readonly FlowLayoutPanel _utilityActions = new();
     private readonly TabAddButton _newTabButton = new();
+    private readonly WorkspaceSwitchButton _workspaceButton = new();
     private readonly ContextMenuStrip _downloadsMenu = new();
     private readonly ContextMenuStrip _historyMenu = new();
     private readonly ContextMenuStrip _guiScaleMenu = new();
+    private readonly ContextMenuStrip _workspaceMenu = new();
     private readonly TabStripMouseWheelFilter _tabWheelFilter;
     private readonly RoundedFlyoutPanel _actionFlyout = new();
     private readonly Label _actionFlyoutTitle = new();
@@ -76,20 +79,37 @@ public sealed class MainForm : SnapWindowForm
     private CoreWebView2BrowserExtension? _uBlockExtension;
     private CoreWebView2BrowserExtension? _cookieGuardExtension;
     private BrowserTab? _activeTab;
+    private BrowserTab? _splitLeftTab;
+    private BrowserTab? _splitRightTab;
     private BrowserTab? _draggedTab;
+    private readonly HashSet<BrowserTab> _selectedTabs = [];
+    private readonly List<BrowserTab> _draggedTabs = [];
+    private BrowserTab? _selectionAnchor;
+    private BrowserTab? _dragGroupTarget;
     private bool _creatingTab;
     private int _queuedTabRequests;
     private bool _uBlockEnabled;
     private bool _cookieGuardEnabled;
     private bool _uBlockLoadAttempted;
     private bool _cookieGuardLoadAttempted;
+    private Task? _protectionPreparationTask;
+    private bool _suspensionSweepRunning;
+    private bool _recoveringBrowserProcess;
     private int _revealVersion;
     private int _tabScrollOffset;
     private int _tabContentWidth;
     private int _tabViewportWidth;
+    private float _splitRatio = 0.5f;
+    private bool _draggingSplitDivider;
     private Panel? _titleBar;
     private Panel? _titleArea;
     private TableLayoutPanel? _toolbar;
+    private FlowLayoutPanel? _windowButtons;
+    private bool _applyingGuiScale;
+    private bool? _googleSignedIn;
+    private bool _googleSignInBlocked;
+    private bool _openingGoogleAccount;
+    private BrowserTab? _googleAccountTab;
     private DateTime _lastFullscreenToggleUtc;
     private bool _f11FullscreenMode;
     private bool _f11HotKeyRegistered;
@@ -103,8 +123,13 @@ public sealed class MainForm : SnapWindowForm
     private string _bookmarkQuery = string.Empty;
     private int _bookmarkLimit = 30;
     private Guid? _editingBookmark;
+    private readonly Dictionary<string, Task<string?>> _bookmarkIconLoads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (DateTime ExpiresUtc, IReadOnlyList<string> Suggestions)> _googleSuggestionCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource _bookmarkIconCancellation = new();
 
     private static readonly TimeSpan InactiveTabDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DiscardInactiveTabDelay = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan GoogleSuggestionCacheLifetime = TimeSpan.FromMinutes(2);
     private static readonly HttpClient GoogleSuggestionClient = new()
     {
         Timeout = TimeSpan.FromSeconds(3)
@@ -116,12 +141,34 @@ public sealed class MainForm : SnapWindowForm
     };
 
     private static readonly float[] GuiScales = [0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.2f, 1.3f, 1.4f];
-    private static readonly (string Name, string Description)[] SearchProviders =
+
+    private sealed record WorkspaceColorChoice(string Name, Color Color);
+
+    // Deliberately a small, high-contrast palette. These colors are used as a
+    // quiet tab accent, not as a second theme system.
+    private static readonly WorkspaceColorChoice[] WorkspaceColors =
     [
-        ("Google", "Google Search"),
-        ("DuckDuckGo", "Private search by DuckDuckGo"),
-        ("Bing", "Microsoft Bing"),
-        ("Brave", "Brave Search")
+        new("Blue", Color.FromArgb(96, 149, 229)),
+        new("Mint", Color.FromArgb(84, 184, 155)),
+        new("Violet", Color.FromArgb(152, 123, 234)),
+        new("Rose", Color.FromArgb(227, 122, 167)),
+        new("Amber", Color.FromArgb(231, 182, 92)),
+        new("Coral", Color.FromArgb(231, 123, 104))
+    ];
+
+    private static readonly string[] WorkspaceIcons = ["●", "◆", "▣", "✦", "▰", "⌘"];
+
+    private sealed record WorkspaceTemplate(
+        string Name,
+        string Icon,
+        Color Color,
+        string[] GroupNames);
+
+    private static readonly WorkspaceTemplate[] WorkspaceTemplates =
+    [
+        new("School", "▣", WorkspaceColors[1].Color, ["Courses", "Assignments"]),
+        new("Work", "◆", WorkspaceColors[0].Color, ["Focus", "Meetings"]),
+        new("Research", "✦", WorkspaceColors[2].Color, ["Reading", "Sources"])
     ];
 
     private static readonly HashSet<string> BlockedHosts = new(StringComparer.OrdinalIgnoreCase)
@@ -167,8 +214,10 @@ public sealed class MainForm : SnapWindowForm
             Button = button;
         }
 
-        public WebView2 View { get; }
+        public WebView2 View { get; private set; }
         public TabButton Button { get; }
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public Guid WorkspaceId { get; set; }
         public string Title { get; set; } = "Tugle";
         public bool IsHome { get; set; }
         public string? FaviconUrl { get; set; }
@@ -184,12 +233,16 @@ public sealed class MainForm : SnapWindowForm
         public Task? InitializationTask { get; set; }
         public bool DeferredNavigation { get; set; }
         public bool IsPinned { get; set; }
+        public Guid? GroupId { get; set; }
         public bool FallbackHostFilterRegistered { get; set; }
         public bool IsClosing { get; set; }
         public bool InitialNavigationStarted { get; set; }
         public string? InitialNavigationTarget { get; set; }
         public bool InitialNavigationReady { get; set; }
+        public bool IsDiscarded { get; set; }
         public ulong NavigationId { get; set; }
+
+        public void ReplaceView(WebView2 view) => View = view;
     }
 
     private sealed class DownloadItem(string path)
@@ -214,12 +267,16 @@ public sealed class MainForm : SnapWindowForm
         GuiScale,
         Theme,
         Downloads,
-        Accounts
+        Accounts,
+        BrowserSettings,
+        Performance,
+        GoogleAccount
     }
 
     public MainForm(bool isPrivate = false)
     {
         _isPrivate = isPrivate;
+        AutoScaleMode = AutoScaleMode.None; // Chrome sizes already include GUI scale and monitor DPI.
         _settings = TugleSettings.Load();
         _history = new HistoryStore(TugleSettings.ProfileDirectory, persistent: !_isPrivate);
         _library = new LibraryStore(TugleSettings.ProfileDirectory, persistent: !_isPrivate);
@@ -282,7 +339,7 @@ public sealed class MainForm : SnapWindowForm
             
             if (!_isPrivate && (!_settings.SetupCompleted || _settings.SetupVersion < FirstRunSetupForm.CurrentVersion))
             {
-                using var setup = new FirstRunSetupForm(GetEnvironmentAsync, _selectedTheme);
+                using var setup = new FirstRunSetupForm(GetEnvironmentAsync, _selectedTheme, PrepareProtectionAsync);
                 if (setup.ShowDialog(this) == DialogResult.OK)
                 {
                     _settings.LowMemoryMode = true;
@@ -293,7 +350,7 @@ public sealed class MainForm : SnapWindowForm
                     _homeBackground = setup.SelectedBackground;
                     _homeBackgroundSecondary = setup.SelectedBackgroundSecondary;
                     _homeBackgroundMediaUrl = setup.SelectedBackgroundMediaUrl;
-                    _settings.GoogleConnected = setup.ConnectGoogle;
+                    _googleSignedIn = setup.ConnectGoogle;
                     _settings.SetupCompleted = true;
                     _settings.SetupVersion = FirstRunSetupForm.CurrentVersion;
                     SaveSettings();
@@ -353,6 +410,42 @@ public sealed class MainForm : SnapWindowForm
 
     private WebView2? ActiveWebView => _activeTab?.View;
 
+    private Guid ActiveWorkspaceId => _isPrivate ? Guid.Empty : _settings.ActiveWorkspace.Id;
+
+    private IEnumerable<BrowserTab> ActiveWorkspaceTabs => _isPrivate
+        ? _tabs
+        : _tabs.Where(tab => tab.WorkspaceId == ActiveWorkspaceId && !tab.IsClosing);
+
+    private TugleWorkspace? GetWorkspace(Guid workspaceId) => _isPrivate
+        ? null
+        : _settings.Workspaces.FirstOrDefault(workspace => workspace.Id == workspaceId);
+
+    private Guid GetValidWorkspaceId(Guid? workspaceId) =>
+        !_isPrivate && workspaceId is { } id && GetWorkspace(id) is not null
+            ? id
+            : ActiveWorkspaceId;
+
+    private void UpdateWorkspaceSwitcher()
+    {
+        if (_isPrivate)
+        {
+            _workspaceButton.Visible = false;
+            return;
+        }
+
+        var workspace = _settings.ActiveWorkspace;
+        _workspaceButton.Visible = true;
+        _workspaceButton.WorkspaceName = workspace.Name;
+        _workspaceButton.WorkspaceIcon = workspace.Icon;
+        _workspaceButton.WorkspaceColor = TugleSettings.FromHex(workspace.Color, _accent);
+        _workspaceButton.ForeColor = _text;
+        _workspaceButton.BackColor = _chrome;
+        _workspaceButton.AccessibleDescription = $"Current workspace: {workspace.Name}. Switch workspaces.";
+        _tooltips.SetToolTip(_workspaceButton, $"{workspace.Name} workspace (Ctrl+Shift+W)");
+        _workspaceButton.Invalidate();
+        if (_titleArea is not null) LayoutTabStrip(_titleArea);
+    }
+
     private void BuildChrome()
     {
         var titleBar = _titleBar = new Panel { Dock = DockStyle.Top, Height = Ui(54), BackColor = _chrome };
@@ -373,6 +466,21 @@ public sealed class MainForm : SnapWindowForm
         titleArea.Resize += (_, _) => LayoutTabStrip(titleArea);
         titleBar.Resize += (_, _) => LayoutTabStrip(titleArea);
 
+        _workspaceButton.UiScale = GuiScale;
+        _workspaceButton.Font = CreateUiFont(12F);
+        _workspaceButton.WorkspaceColor = TugleSettings.FromHex(_settings.ActiveWorkspace.Color, _accent);
+        _workspaceButton.WorkspaceIcon = _settings.ActiveWorkspace.Icon;
+        _workspaceButton.WorkspaceName = _settings.ActiveWorkspace.Name;
+        _workspaceButton.BackColor = _chrome;
+        _workspaceButton.ForeColor = _text;
+        _workspaceButton.Cursor = Cursors.Hand;
+        _workspaceButton.AccessibleName = "Workspaces";
+        _workspaceButton.AccessibleDescription = "Switch tab workspaces";
+        _workspaceButton.Click += (_, _) => ShowWorkspaceMenu();
+        _tooltips.SetToolTip(_workspaceButton, "Workspaces (Ctrl+Shift+W)");
+        ConfigureToolbarMenu(_workspaceMenu);
+        _workspaceMenu.Opening += (_, _) => PopulateWorkspaceMenu();
+
         _newTabButton.Text = "+";
         _newTabButton.Size = new Size(Ui(36), Ui(32));
         _newTabButton.Font = CreateUiFont(13F);
@@ -391,13 +499,15 @@ public sealed class MainForm : SnapWindowForm
         _newTabButton.Cursor = Cursors.Hand;
         _tooltips.SetToolTip(_newTabButton, "New tab (Ctrl+T)");
         _newTabButton.Click += async (_, _) => await RequestNewTabAsync();
+        titleArea.Controls.Add(_workspaceButton);
         titleArea.Controls.Add(_tabsFlow);
         titleArea.Controls.Add(_newTabButton);
+        _workspaceButton.BringToFront();
         _newTabButton.BringToFront();
         LayoutTabStrip(titleArea);
         titleBar.Controls.Add(titleArea);
 
-        var windowButtons = new FlowLayoutPanel
+        var windowButtons = _windowButtons = new FlowLayoutPanel
         {
             Dock = DockStyle.Right,
             Width = Ui(138),
@@ -410,7 +520,7 @@ public sealed class MainForm : SnapWindowForm
         AddWindowButton(windowButtons, "", "Maximize or restore", ToggleMaximize);
         AddWindowButton(windowButtons, "", "Close", Close);
         titleBar.Controls.Add(windowButtons);
-        windowButtons.BringToFront();
+        titleArea.BringToFront(); // Dock the right-side buttons before the fill panel.
         RegisterSnapButton(_maximizeButton!);
         Resize += (_, _) => _maximizeButton!.Text = WindowState == FormWindowState.Maximized ? "" : "";
 
@@ -516,6 +626,34 @@ public sealed class MainForm : SnapWindowForm
 
         _contentHost.Dock = DockStyle.Fill;
         _contentHost.BackColor = _theme.ContentBackground;
+        _contentHost.Resize += (_, _) => LayoutContentViews();
+        _splitDivider.BackColor = _theme.Chrome;
+        _splitDivider.Cursor = Cursors.SizeWE;
+        _splitDivider.Visible = false;
+        _splitDivider.AccessibleName = "Resize split view";
+        _splitDivider.AccessibleDescription = "Drag to resize. Double-click for equal widths.";
+        _tooltips.SetToolTip(_splitDivider, "Drag to resize · Double-click for equal widths");
+        _splitDivider.Paint += (_, e) =>
+        {
+            using var pen = new Pen(_theme.BorderStrong, Ui(1));
+            var center = _splitDivider.Width / 2;
+            e.Graphics.DrawLine(pen, center, 0, center, _splitDivider.Height);
+        };
+        _splitDivider.MouseEnter += (_, _) => _splitDivider.BackColor = _theme.SurfaceHover;
+        _splitDivider.MouseLeave += (_, _) => _splitDivider.BackColor = _theme.Chrome;
+        _splitDivider.MouseDoubleClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || !HasSplitView) return;
+            _draggingSplitDivider = false;
+            _splitDivider.Capture = false;
+            _splitRatio = 0.5f;
+            LayoutContentViews();
+        };
+        _splitDivider.MouseDown += BeginSplitDividerDrag;
+        _splitDivider.MouseMove += MoveSplitDivider;
+        _splitDivider.MouseUp += EndSplitDividerDrag;
+        _splitDivider.MouseCaptureChanged += (_, _) => _draggingSplitDivider = false;
+        _contentHost.Controls.Add(_splitDivider);
         Controls.Add(_contentHost);
         Controls.Add(toolbar);
         Controls.Add(titleBar);
@@ -645,9 +783,7 @@ public sealed class MainForm : SnapWindowForm
         if (_environment is null)
         {
             var environmentOptions = new CoreWebView2EnvironmentOptions(
-                _settings.LowMemoryMode
-                    ? "--disable-background-networking --no-default-browser-check --disable-features=msEdgeSidebarV2"
-                    : "--no-default-browser-check",
+                "--no-default-browser-check --disable-features=msEdgeSidebarV2",
                 null,
                 null,
                 false,
@@ -661,6 +797,7 @@ public sealed class MainForm : SnapWindowForm
             try
             {
                 _environment = await (_environmentTask ??= CoreWebView2Environment.CreateAsync(null, profilePath, environmentOptions));
+                _environment.BrowserProcessExited += OnBrowserProcessExited;
             }
             catch
             {
@@ -671,7 +808,19 @@ public sealed class MainForm : SnapWindowForm
         return _environment!;
     }
 
-    private async Task<BrowserTab?> OpenNewTabAsync(bool showHome = true, bool activate = true, bool deferInitialization = false)
+    private WebView2 CreateBrowserView() => new()
+    {
+        Dock = DockStyle.Fill,
+        DefaultBackgroundColor = _theme.ContentBackground,
+        Visible = false
+    };
+
+    private async Task<BrowserTab?> OpenNewTabAsync(
+        bool showHome = true,
+        bool activate = true,
+        bool deferInitialization = false,
+        Guid? workspaceId = null,
+        Guid? tabWorkspaceId = null)
     {
         if (_creatingTab) return null;
         _creatingTab = true;
@@ -679,12 +828,7 @@ public sealed class MainForm : SnapWindowForm
 
         try
         {
-            var view = new WebView2
-            {
-                Dock = DockStyle.Fill,
-                DefaultBackgroundColor = _theme.ContentBackground,
-                Visible = false
-            };
+            var view = CreateBrowserView();
             var tabButton = new TabButton
             {
                 Text = "Tugle",
@@ -700,9 +844,20 @@ public sealed class MainForm : SnapWindowForm
             tabButton.AutoEllipsis = true;
             tabButton.UseCompatibleTextRendering = false;
             tabButton.FlatAppearance.BorderSize = 0;
-            var tab = createdTab = new BrowserTab(view, tabButton);
+            var effectiveWorkspaceId = _isPrivate ? Guid.Empty : GetValidWorkspaceId(tabWorkspaceId);
+            var tab = createdTab = new BrowserTab(view, tabButton)
+            {
+                WorkspaceId = effectiveWorkspaceId,
+                GroupId = GetValidTabGroupId(workspaceId, effectiveWorkspaceId)
+            };
+            view.GotFocus += (_, _) => FocusSplitTab(tab);
             tabButton.AccessibleName = "Tugle tab";
             tabButton.AccessibleDescription = "Use the speaker button to mute this tab, or the X to close it.";
+            tabButton.MouseDown += (_, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                    SelectTabFromPointer(tab, ModifierKeys);
+            };
             tabButton.Click += (_, _) => ActivateTab(tab);
             tabButton.CloseRequested += (_, _) => CloseTab(tab);
             tabButton.MuteRequested += (_, _) => ToggleTabMute(tab);
@@ -763,11 +918,13 @@ public sealed class MainForm : SnapWindowForm
             return;
         }
 
-        await OpenNewTabAsync();
+        var groupId = _isPrivate ? null : _activeTab?.GroupId;
+        Guid? tabWorkspaceId = _isPrivate ? null : _activeTab?.WorkspaceId ?? ActiveWorkspaceId;
+        await OpenNewTabAsync(workspaceId: groupId, tabWorkspaceId: tabWorkspaceId);
         while (_queuedTabRequests > 0)
         {
             _queuedTabRequests--;
-            await OpenNewTabAsync();
+            await OpenNewTabAsync(workspaceId: groupId, tabWorkspaceId: tabWorkspaceId);
         }
     }
 
@@ -776,7 +933,7 @@ public sealed class MainForm : SnapWindowForm
         var savedTabs = _settings.PreviousSessionTabs.ToArray();
         if (savedTabs.Length == 0)
         {
-            await OpenNewTabAsync();
+            await OpenWorkspaceStartupTabAsync();
             return;
         }
 
@@ -784,21 +941,32 @@ public sealed class MainForm : SnapWindowForm
         BrowserTab? firstTab = null;
         foreach (var savedTab in savedTabs)
         {
-            var tab = await OpenNewTabAsync(showHome: false, activate: false, deferInitialization: true);
+            var tab = await OpenNewTabAsync(
+                showHome: false,
+                activate: false,
+                deferInitialization: true,
+                workspaceId: savedTab.GroupId,
+                tabWorkspaceId: savedTab.WorkspaceId);
             if (tab is null) continue;
 
-            firstTab ??= tab;
+            tab.Id = savedTab.Id == Guid.Empty ? tab.Id : savedTab.Id;
+            firstTab ??= tab.WorkspaceId == ActiveWorkspaceId ? tab : firstTab;
             tab.Title = string.IsNullOrWhiteSpace(savedTab.Title) ? tab.Title : savedTab.Title;
             tab.IsPinned = savedTab.IsPinned;
+            tab.GroupId = GetValidTabGroupId(savedTab.GroupId, tab.WorkspaceId);
             tab.IsHome = savedTab.IsHome;
             tab.DeferredNavigation = true;
             tab.InitialNavigationTarget = savedTab.Url;
             UpdateTabButton(tab);
 
-            if (savedTab.IsActive) activeTab = tab;
+            if (savedTab.IsActive && tab.WorkspaceId == ActiveWorkspaceId) activeTab = tab;
         }
 
         OrderPinnedTabs();
+
+        var rememberedId = _settings.ActiveWorkspace.LastActiveTabId;
+        if (rememberedId is { } lastActiveId)
+            activeTab = _tabs.FirstOrDefault(tab => tab.WorkspaceId == ActiveWorkspaceId && tab.Id == lastActiveId) ?? activeTab;
 
         var tabToActivate = activeTab ?? firstTab;
         if (tabToActivate is not null)
@@ -809,7 +977,7 @@ public sealed class MainForm : SnapWindowForm
 
         // Keep the browser usable if WebView2 was unable to recreate all of a
         // damaged or stale saved session.
-        await OpenNewTabAsync();
+        await OpenWorkspaceStartupTabAsync();
     }
 
     private void CapturePreviousSession()
@@ -818,6 +986,9 @@ public sealed class MainForm : SnapWindowForm
         // previously saved session in that case instead of replacing it with an
         // empty one.
         if (_tabs.Count == 0) return;
+
+        if (!_isPrivate && _activeTab is { IsClosing: false } active && GetWorkspace(active.WorkspaceId) is { } workspace)
+            workspace.LastActiveTabId = active.Id;
 
         var savedTabs = new List<TugleSessionTab>();
         foreach (var tab in _tabs.Where(tab => !tab.IsClosing))
@@ -835,9 +1006,12 @@ public sealed class MainForm : SnapWindowForm
         {
             return new TugleSessionTab
             {
+                Id = tab.Id,
+                WorkspaceId = tab.WorkspaceId,
                 IsHome = true,
                 IsActive = ReferenceEquals(tab, _activeTab),
                 IsPinned = tab.IsPinned,
+                GroupId = tab.GroupId,
                 Title = tab.Title
             };
         }
@@ -845,9 +1019,12 @@ public sealed class MainForm : SnapWindowForm
         return TryGetRestorableTabUrl(tab, out var url)
             ? new TugleSessionTab
             {
+                Id = tab.Id,
+                WorkspaceId = tab.WorkspaceId,
                 Url = url,
                 IsActive = ReferenceEquals(tab, _activeTab),
                 IsPinned = tab.IsPinned,
+                GroupId = tab.GroupId,
                 Title = tab.Title
             }
             : null;
@@ -874,15 +1051,23 @@ public sealed class MainForm : SnapWindowForm
         _settings.RecentlyClosedTabs.RemoveAt(0);
         SaveSettings();
 
-        var tab = await OpenNewTabAsync(showHome: false);
+        if (savedTab.WorkspaceId != Guid.Empty && savedTab.WorkspaceId != ActiveWorkspaceId)
+            await SwitchWorkspaceAsync(savedTab.WorkspaceId);
+
+        var tab = await OpenNewTabAsync(
+            showHome: false,
+            workspaceId: GetValidTabGroupId(savedTab.GroupId, GetValidWorkspaceId(savedTab.WorkspaceId)),
+            tabWorkspaceId: savedTab.WorkspaceId);
         if (tab?.View.CoreWebView2 is null)
         {
             _settings.RecentlyClosedTabs.Insert(0, savedTab);
             SaveSettings();
             return;
         }
+        tab.Id = savedTab.Id == Guid.Empty ? tab.Id : savedTab.Id;
         tab.Title = string.IsNullOrWhiteSpace(savedTab.Title) ? tab.Title : savedTab.Title;
         tab.IsPinned = savedTab.IsPinned;
+        tab.GroupId = GetValidTabGroupId(savedTab.GroupId, tab.WorkspaceId);
         UpdateTabButton(tab);
         if (savedTab.IsHome)
             ShowHome(tab);
@@ -954,10 +1139,12 @@ public sealed class MainForm : SnapWindowForm
         core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark;
         if (!_isPrivate && Enum.TryParse<CoreWebView2TrackingPreventionLevel>(_settings.TrackingPrevention, out var trackingLevel))
             core.Profile.PreferredTrackingPreventionLevel = trackingLevel;
-        await EnsureUBlockAsync(core);
-        await EnsureCookieGuardAsync(core);
         if (tab.IsClosing || tab.View.IsDisposed) return;
-        if (_settings.UBlockEnabled && !_uBlockEnabled) EnableFallbackHostFilter(tab, core);
+        // Keep a small built-in filter active while the optional extensions are
+        // prepared. Extension setup can involve disk I/O and must not delay the
+        // first page a person opens.
+        if (_settings.UBlockEnabled) EnableFallbackHostFilter(tab, core);
+        _ = PrepareProtectionAsync(core);
         AttachWebViewF11Handler(tab);
         await core.AddScriptToExecuteOnDocumentCreatedAsync("""
             (() => {
@@ -993,8 +1180,10 @@ public sealed class MainForm : SnapWindowForm
         if (tab.IsClosing || tab.View.IsDisposed) return;
 
         core.WebMessageReceived += async (_, e) => await OnWebMessageReceivedAsync(tab, e);
-        core.NewWindowRequested += async (_, e) => await OnNewWindowRequestedAsync(e);
+        core.NewWindowRequested += async (_, e) => await OnNewWindowRequestedAsync(tab, e);
         core.DownloadStarting += (_, e) => OnDownloadStarting(e);
+        core.PermissionRequested += (_, e) => OnPermissionRequested(tab, e);
+        core.ProcessFailed += (_, e) => OnProcessFailed(tab, e);
         core.NavigationStarting += (_, e) => OnNavigationStarting(tab, e);
         core.NavigationCompleted += async (_, e) => await OnNavigationCompletedAsync(tab, e);
         core.SourceChanged += (_, _) => { if (ReferenceEquals(tab, _activeTab)) UpdateAddressBar(); };
@@ -1033,6 +1222,217 @@ public sealed class MainForm : SnapWindowForm
         };
     }
 
+    private void OnProcessFailed(BrowserTab tab, CoreWebView2ProcessFailedEventArgs e)
+    {
+        if (tab.IsClosing || IsDisposed || Disposing) return;
+
+        if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
+        {
+            // BrowserProcessExited is raised by the shared environment after its
+            // resources are released. Recover there, rather than racing it here.
+            return;
+        }
+
+        if (e.ProcessFailedKind != CoreWebView2ProcessFailedKind.RenderProcessExited) return;
+
+        // A crashed page renderer can usually be recreated by a normal reload.
+        // Do this only for the affected tab; GPU and utility failures recover in
+        // WebView2 without throwing away page state.
+        void ReloadFailedRenderer()
+        {
+            if (tab.IsClosing || tab.View.IsDisposed) return;
+            try
+            {
+                tab.IsSuspended = false;
+                tab.View.CoreWebView2?.Reload();
+            }
+            catch
+            {
+                // The browser-process handler below will restore all tabs if the
+                // failure expands beyond this one renderer.
+            }
+        }
+
+        if (IsHandleCreated)
+        {
+            try { BeginInvoke((Action)ReloadFailedRenderer); }
+            catch { /* The window may be closing at the same time. */ }
+        }
+    }
+
+    private void OnBrowserProcessExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs e)
+    {
+        if (e.BrowserProcessExitKind != CoreWebView2BrowserProcessExitKind.Failed ||
+            IsDisposed || Disposing || !IsHandleCreated) return;
+
+        try { BeginInvoke((Action)(() => _ = RecoverBrowserProcessAsync())); }
+        catch { /* The window may be closing at the same time. */ }
+    }
+
+    private async Task RecoverBrowserProcessAsync()
+    {
+        if (_recoveringBrowserProcess || IsDisposed || Disposing) return;
+
+        _recoveringBrowserProcess = true;
+        try
+        {
+            var activeTab = _activeTab;
+            foreach (var tab in _tabs.Where(tab => !tab.IsClosing).ToArray())
+            {
+                var restoreHome = tab.IsHome;
+                var restoreUrl = tab.DeferredNavigation ? tab.InitialNavigationTarget : null;
+                if (!restoreHome && string.IsNullOrWhiteSpace(restoreUrl))
+                {
+                    if (TryGetRestorableTabUrl(tab, out var currentUrl)) restoreUrl = currentUrl;
+                }
+
+                // If the crashed controller cannot still report a valid source,
+                // keep the tab usable by falling back to Home.
+                if (!restoreHome && string.IsNullOrWhiteSpace(restoreUrl)) restoreHome = true;
+
+                var previousView = tab.View;
+                tab.SuggestionCancellation?.Cancel();
+                tab.SuggestionCancellation?.Dispose();
+                tab.SuggestionCancellation = null;
+                tab.FaviconRequestVersion++;
+                tab.InitializationTask = null;
+                tab.InitialNavigationStarted = false;
+                tab.InitialNavigationReady = false;
+                tab.InitialNavigationTarget = restoreUrl;
+                tab.DeferredNavigation = true;
+                tab.IsHome = restoreHome;
+                tab.IsSuspended = false;
+                tab.IsSuspending = false;
+                tab.IsDiscarded = false;
+                tab.FallbackHostFilterRegistered = false;
+
+                BatchChromeUpdate(() =>
+                {
+                    _contentHost.Controls.Remove(previousView);
+                    tab.ReplaceView(CreateBrowserView());
+                    _contentHost.Controls.Add(tab.View);
+                    tab.View.Bounds = _contentHost.ClientRectangle;
+                });
+                previousView.Dispose();
+                UpdateTabButton(tab);
+            }
+
+            // A failed browser process cannot be reused. The next selected tab
+            // creates a fresh shared environment; other tabs stay lazy.
+            _environment = null;
+            _environmentTask = null;
+            _protectionPreparationTask = null;
+            _uBlockExtension = null;
+            _cookieGuardExtension = null;
+            _uBlockEnabled = false;
+            _cookieGuardEnabled = false;
+            _uBlockLoadAttempted = false;
+            _cookieGuardLoadAttempted = false;
+            CapturePreviousSession();
+            SaveSettings();
+
+            if (activeTab is not null && _tabs.Contains(activeTab) && !activeTab.IsClosing)
+                await ActivateTabAsync(activeTab);
+            else if (_tabs.Count > 0)
+                await ActivateTabAsync(_tabs.First(tab => !tab.IsClosing));
+        }
+        catch
+        {
+            if (!IsDisposed && !Disposing)
+                MessageBox.Show(this, "Tugle restored your tabs after the browser engine stopped. Select a tab to retry any page that did not reload.",
+                    "Tugle recovery", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        finally
+        {
+            _recoveringBrowserProcess = false;
+        }
+    }
+
+    private void OnPermissionRequested(BrowserTab tab, CoreWebView2PermissionRequestedEventArgs e)
+    {
+        if (tab.IsClosing || !IsSensitivePermission(e.PermissionKind)) return;
+
+        if (IsDisposed || Disposing || !IsHandleCreated)
+        {
+            e.State = CoreWebView2PermissionState.Deny;
+            e.SavesInProfile = false;
+            return;
+        }
+
+        var deferral = e.GetDeferral();
+        try
+        {
+            BeginInvoke((Action)(() =>
+            {
+                try
+                {
+                    if (IsDisposed || Disposing || tab.IsClosing)
+                    {
+                        e.State = CoreWebView2PermissionState.Deny;
+                        e.SavesInProfile = false;
+                        return;
+                    }
+
+                    var origin = GetPermissionOrigin(e.Uri);
+                    var permission = GetPermissionLabel(e.PermissionKind);
+                    var persistence = _isPrivate ? "This choice applies only to this private window." :
+                        "This choice is remembered for this site.";
+                    var allow = MessageBox.Show(
+                        this,
+                        $"{origin} wants to use {permission}.\n\n{persistence}",
+                        "Site permission",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                    e.State = allow ? CoreWebView2PermissionState.Allow : CoreWebView2PermissionState.Deny;
+                    e.SavesInProfile = !_isPrivate;
+                }
+                catch
+                {
+                    e.State = CoreWebView2PermissionState.Deny;
+                    e.SavesInProfile = false;
+                }
+                finally
+                {
+                    deferral.Complete();
+                }
+            }));
+        }
+        catch
+        {
+            e.State = CoreWebView2PermissionState.Deny;
+            e.SavesInProfile = false;
+            deferral.Complete();
+        }
+    }
+
+    private static bool IsSensitivePermission(CoreWebView2PermissionKind permission) => permission is
+        CoreWebView2PermissionKind.Microphone or
+        CoreWebView2PermissionKind.Camera or
+        CoreWebView2PermissionKind.Geolocation or
+        CoreWebView2PermissionKind.Notifications or
+        CoreWebView2PermissionKind.ClipboardRead or
+        CoreWebView2PermissionKind.MultipleAutomaticDownloads or
+        CoreWebView2PermissionKind.FileReadWrite;
+
+    private static string GetPermissionLabel(CoreWebView2PermissionKind permission) => permission switch
+    {
+        CoreWebView2PermissionKind.Microphone => "your microphone",
+        CoreWebView2PermissionKind.Camera => "your camera",
+        CoreWebView2PermissionKind.Geolocation => "your location",
+        CoreWebView2PermissionKind.Notifications => "notifications",
+        CoreWebView2PermissionKind.ClipboardRead => "your clipboard",
+        CoreWebView2PermissionKind.MultipleAutomaticDownloads => "multiple downloads",
+        CoreWebView2PermissionKind.FileReadWrite => "files on your device",
+        _ => "a protected browser capability"
+    };
+
+    private static string GetPermissionOrigin(string? uri)
+    {
+        if (Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return parsed.GetLeftPart(UriPartial.Authority);
+        return "This site";
+    }
+
     private void AttachWebViewF11Handler(BrowserTab tab)
     {
         // The WinForms WebView2 control keeps its controller internal, but the
@@ -1052,6 +1452,15 @@ public sealed class MainForm : SnapWindowForm
             if (!TryHandleBrowserShortcut(modifiers | (Keys)e.VirtualKey)) return;
             e.Handled = true;
         };
+    }
+
+    private Task PrepareProtectionAsync(CoreWebView2 core) =>
+        _protectionPreparationTask ??= PrepareProtectionCoreAsync(core);
+
+    private async Task PrepareProtectionCoreAsync(CoreWebView2 core)
+    {
+        await EnsureUBlockAsync(core);
+        await EnsureCookieGuardAsync(core);
     }
 
     private async Task EnsureUBlockAsync(CoreWebView2 core)
@@ -1091,6 +1500,7 @@ public sealed class MainForm : SnapWindowForm
             // The built-in host list below remains active if this WebView2 runtime
             // cannot load the unpacked uBlock extension.
             _uBlockEnabled = false;
+            _uBlockLoadAttempted = false;
         }
     }
 
@@ -1126,6 +1536,7 @@ public sealed class MainForm : SnapWindowForm
         {
             // Cookie banners are optional UI. A failed extension install must not stop browsing.
             _cookieGuardEnabled = false;
+            _cookieGuardLoadAttempted = false;
         }
     }
 
@@ -1135,7 +1546,8 @@ public sealed class MainForm : SnapWindowForm
         tab.InitialNavigationStarted = true;
         tab.IsHome = false;
         tab.IsSuspended = false;
-        RecordSearchFromNavigation(e.Uri);
+        tab.IsDiscarded = false;
+        if (!e.IsRedirected) RecordSearchFromNavigation(e.Uri);
         if (ReferenceEquals(tab, _activeTab)) SetLoadingState(true);
     }
 
@@ -1175,14 +1587,22 @@ public sealed class MainForm : SnapWindowForm
             if (tab.IsHome)
             {
                 tab.Title = "Tugle";
-                await PopulateHomeAsync(tab);
+                // Apply the compact palette first so the Home shell can be shown
+                // immediately without a theme flash. History and recent sites
+                // arrive after it is visible.
+                await ApplyHomeThemeAsync(tab);
                 if (tab.IsClosing || tab.View.IsDisposed || e.NavigationId != tab.NavigationId) return;
+                _ = PopulateHomeDataAsync(tab);
             }
             else if (!string.IsNullOrWhiteSpace(core.Source))
             {
                 _history.RecordVisit(core.Source, GetVisitTitle(core.Source, core.DocumentTitle), tab.FaviconUrl);
                 RefreshHistoryFlyoutIfVisible();
             }
+            if (ApplyWorkspaceRule(tab, core.Source))
+                LayoutTabs();
+            if (GetWorkspaceRoute(core.Source) is { } route)
+                await ApplyWorkspaceRouteAsync(tab, route, activateDestination: ReferenceEquals(tab, _activeTab));
             UpdateTabButton(tab);
             if (ReferenceEquals(tab, _activeTab)) _ = RevealTabAsync(tab);
         }
@@ -1198,6 +1618,36 @@ public sealed class MainForm : SnapWindowForm
             UpdateAddressBar();
             UpdateNavigationButtons();
         }
+    }
+
+    private bool ApplyWorkspaceRule(BrowserTab tab, string? source)
+    {
+        if (_isPrivate || tab.IsClosing || GetWorkspace(tab.WorkspaceId) is not { } workspace ||
+            !Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            return false;
+
+        var host = uri.Host.ToLowerInvariant();
+        var rule = workspace.Rules.FirstOrDefault(candidate => candidate.Enabled &&
+            HostMatchesWorkspaceRule(host, candidate.HostPattern) &&
+            _settings.TabGroups.Any(group => group.Id == candidate.TargetGroupId && group.WorkspaceId == tab.WorkspaceId));
+        if (rule is null || tab.GroupId == rule.TargetGroupId) return false;
+        tab.GroupId = rule.TargetGroupId;
+        UpdateTabButton(tab);
+        CapturePreviousSession();
+        SaveSettings();
+        return true;
+    }
+
+    private static bool HostMatchesWorkspaceRule(string host, string? pattern)
+    {
+        var value = pattern?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        if (value.StartsWith("*.", StringComparison.Ordinal))
+        {
+            var suffix = value[2..];
+            return host.Length > suffix.Length && host.EndsWith("." + suffix, StringComparison.Ordinal);
+        }
+        return string.Equals(host, value, StringComparison.Ordinal);
     }
 
     private async Task RefreshTabFaviconAsync(BrowserTab tab)
@@ -1253,23 +1703,19 @@ public sealed class MainForm : SnapWindowForm
         tab.FaviconImageUri = favicon is null ? null : tab.FaviconUrl;
         previous?.Dispose();
         UpdateTabButton(tab);
+        CaptureBookmarkIcon(tab);
     }
 
     private async Task PopulateHomeAsync(BrowserTab tab)
     {
+        await ApplyHomeThemeAsync(tab);
+        await PopulateHomeDataAsync(tab);
+    }
+
+    private async Task ApplyHomeThemeAsync(BrowserTab tab)
+    {
         if (!tab.IsHome || tab.View.IsDisposed || tab.View.CoreWebView2 is null || tab.IsSuspended) return;
 
-        var payload = new
-        {
-            visits = _history.MostUsedSites
-                .Select(item => new
-            {
-                item.Url,
-                item.Title,
-                item.IconUrl
-            }),
-            searches = _history.SearchSuggestions
-        };
         var themePayload = new
         {
             background = ColorToCss(_homeBackground),
@@ -1286,13 +1732,40 @@ public sealed class MainForm : SnapWindowForm
             backgroundMedia = _homeBackgroundMediaUrl,
             backgroundSecondary = ColorToCss(_homeBackgroundSecondary)
         };
-        var json = JsonSerializer.Serialize(payload);
         var themeJson = JsonSerializer.Serialize(themePayload);
 
         try
         {
-            await tab.View.CoreWebView2.ExecuteScriptAsync(
-                $"window.tugleSetTheme({themeJson}); window.tugleSetData({json});");
+            await tab.View.CoreWebView2.ExecuteScriptAsync($"window.tugleSetTheme({themeJson});");
+        }
+        catch
+        {
+            // The home page may be navigating away while this update is sent.
+        }
+    }
+
+    private async Task PopulateHomeDataAsync(BrowserTab tab)
+    {
+        if (!tab.IsHome || tab.View.IsDisposed || tab.View.CoreWebView2 is null || tab.IsSuspended) return;
+
+        var payload = new
+        {
+            visits = _history.MostUsedSites
+                .Select(item => new
+                {
+                    item.Url,
+                    item.Title,
+                    item.IconUrl
+                }),
+            searches = _history.SearchSuggestions,
+            searchEngine = _settings.SearchEngine,
+            searchUrl = BuildSearchUrl(string.Empty)
+        };
+        var json = JsonSerializer.Serialize(payload);
+
+        try
+        {
+            await tab.View.CoreWebView2.ExecuteScriptAsync($"window.tugleSetData({json});");
         }
         catch
         {
@@ -1377,11 +1850,21 @@ public sealed class MainForm : SnapWindowForm
             return;
         }
 
+        const string searchPrefix = "tugle:search:";
+        if (message.StartsWith(searchPrefix, StringComparison.Ordinal))
+        {
+            var search = message[searchPrefix.Length..].Trim();
+            if (search.Length > 0 && search.Length <= 4096)
+                tab.View.CoreWebView2.Navigate(BuildSearchUrl(search));
+            return;
+        }
+
         const string prefix = "tugle:google-autocomplete:";
+        if (_settings.SearchEngine != "Google") return;
         if (!message.StartsWith(prefix, StringComparison.Ordinal)) return;
 
         var query = message[prefix.Length..].Trim();
-        if (query.Length == 0 || query.Length > 120) return;
+        if (query.Length < 2 || query.Length > 120) return;
 
         tab.SuggestionCancellation?.Cancel();
         tab.SuggestionCancellation?.Dispose();
@@ -1392,6 +1875,7 @@ public sealed class MainForm : SnapWindowForm
         {
             var suggestions = await FetchGoogleSuggestionsAsync(query, cancellation.Token);
             if (cancellation.IsCancellationRequested || tab.View.IsDisposed ||
+                _settings.SearchEngine != "Google" ||
                 !ReferenceEquals(tab, _activeTab) || !tab.IsHome ||
                 tab.View.CoreWebView2 is null || !IsHomeSource(tab.View.CoreWebView2.Source)) return;
 
@@ -1413,12 +1897,23 @@ public sealed class MainForm : SnapWindowForm
         }
     }
 
-    private static async Task<IReadOnlyList<string>> FetchGoogleSuggestionsAsync(
+    private async Task<IReadOnlyList<string>> FetchGoogleSuggestionsAsync(
         string query,
         CancellationToken cancellationToken)
     {
+        var cacheKey = query.Trim();
+        var now = DateTime.UtcNow;
+        if (_googleSuggestionCache.TryGetValue(cacheKey, out var cached) && cached.ExpiresUtc > now)
+            return cached.Suggestions;
+
+        foreach (var expired in _googleSuggestionCache
+                     .Where(item => item.Value.ExpiresUtc <= now)
+                     .Select(item => item.Key)
+                     .ToArray())
+            _googleSuggestionCache.Remove(expired);
+
         var endpoint = "https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=" +
-            Uri.EscapeDataString(query);
+            Uri.EscapeDataString(cacheKey);
         using var response = await GoogleSuggestionClient.GetAsync(endpoint, cancellationToken);
         if (!response.IsSuccessStatusCode) return [];
 
@@ -1436,7 +1931,9 @@ public sealed class MainForm : SnapWindowForm
                 result.Add(value);
             if (result.Count == 5) break;
         }
-        return result;
+        var suggestions = (IReadOnlyList<string>)result;
+        _googleSuggestionCache[cacheKey] = (now + GoogleSuggestionCacheLifetime, suggestions);
+        return suggestions;
     }
 
     private void NavigateFromAddressBar()
@@ -1456,25 +1953,38 @@ public sealed class MainForm : SnapWindowForm
         }
         else
         {
-            _history.RecordSearch(input);
-            RefreshHistoryFlyoutIfVisible();
             destination = BuildSearchUrl(input);
         }
 
-        ActiveWebView.CoreWebView2.Navigate(destination);
+        _ = NavigateActiveTabAsync(destination);
     }
 
-    private async Task OnNewWindowRequestedAsync(CoreWebView2NewWindowRequestedEventArgs e)
+    private async Task OnNewWindowRequestedAsync(BrowserTab source, CoreWebView2NewWindowRequestedEventArgs e)
     {
         using var deferral = e.GetDeferral();
         try
         {
-            var tab = await OpenNewTabAsync(showHome: false);
+            var route = GetWorkspaceRoute(e.Uri);
+            if (route?.TargetGroupId is { } routeGroupId &&
+                _settings.TabGroups.FirstOrDefault(group => group.Id == routeGroupId) is { IsCollapsed: true })
+            {
+                SetTabGroupCollapsed(routeGroupId, false);
+            }
+            var tab = await OpenNewTabAsync(
+                showHome: false,
+                workspaceId: _isPrivate ? null : route?.TargetGroupId ?? source.GroupId,
+                tabWorkspaceId: _isPrivate ? null : route?.TargetWorkspaceId ?? source.WorkspaceId);
             if (tab?.View.CoreWebView2 is null)
             {
                 e.Handled = true;
                 return;
             }
+
+            // A destination route may point at a collapsed group. Activate it
+            // once more so the newly opened tab, not an older representative,
+            // is the visible page in that workspace.
+            if (route is not null)
+                await ActivateTabAsync(tab);
 
             e.NewWindow = tab.View.CoreWebView2;
             tab.InitialNavigationTarget = e.Uri;
@@ -1563,6 +2073,12 @@ public sealed class MainForm : SnapWindowForm
         var pinItem = new ToolStripMenuItem();
         pinItem.Click += (_, _) => ToggleTabPinned(tab);
 
+        var workspaceItem = new ToolStripMenuItem("Tab group") { Visible = !_isPrivate };
+        workspaceItem.DropDownOpening += (_, _) => PopulateTabGroupMenu(workspaceItem, tab);
+
+        var splitItem = new ToolStripMenuItem();
+        splitItem.Click += async (_, _) => await ToggleSplitViewAsync(tab);
+
         var bookmarkItem = new ToolStripMenuItem();
         bookmarkItem.Click += (_, _) => ToggleBookmark(tab);
 
@@ -1585,12 +2101,19 @@ public sealed class MainForm : SnapWindowForm
             duplicateItem.Enabled = !tab.IsClosing;
             reloadItem.Enabled = !tab.IsClosing && tab.View.CoreWebView2 is not null;
             pinItem.Enabled = !tab.IsClosing;
+            workspaceItem.Enabled = !_isPrivate && !tab.IsClosing && _tabs.Contains(tab);
+            var splitCandidateExists = ActiveWorkspaceTabs.Any(item => !ReferenceEquals(item, tab));
+            splitItem.Visible = !tab.IsClosing && tab.WorkspaceId == ActiveWorkspaceId && splitCandidateExists;
+            splitItem.Text = IsSplitParticipant(tab) ? "Close split view" : "Open in split view";
+            splitItem.Enabled = splitItem.Visible;
             bookmarkItem.Enabled = !_isPrivate && TryGetPageDetails(tab, out _, out _, out _);
             pdfItem.Enabled = tab.View.CoreWebView2 is not null;
             closeItem.Enabled = !tab.IsClosing;
         };
         menu.Items.Add(muteItem);
         menu.Items.Add(pinItem);
+        menu.Items.Add(workspaceItem);
+        menu.Items.Add(splitItem);
         menu.Items.Add(duplicateItem);
         menu.Items.Add(bookmarkItem);
         menu.Items.Add(pdfItem);
@@ -1598,6 +2121,1279 @@ public sealed class MainForm : SnapWindowForm
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(closeItem);
         return menu;
+    }
+
+    private void PopulateTabGroupMenu(ToolStripMenuItem menu, BrowserTab tab)
+    {
+        menu.DropDownItems.Clear();
+        if (_isPrivate || tab.IsClosing || !_tabs.Contains(tab))
+        {
+            menu.Enabled = false;
+            return;
+        }
+
+        menu.Enabled = true;
+        var selectedTabs = GetTabsForOperation(tab);
+        var selectionLabel = selectedTabs.Count > 1 ? $"selected tabs ({selectedTabs.Count})" : "this tab";
+        var current = GetTabGroup(tab);
+        if (current is not null)
+        {
+            var currentItem = new ToolStripMenuItem($"{current.Icon} {current.Name}") { Enabled = false };
+            menu.DropDownItems.Add(currentItem);
+
+            var renameItem = new ToolStripMenuItem("Rename tab group…");
+            renameItem.Click += (_, _) => RenameTabGroup(current.Id);
+            menu.DropDownItems.Add(renameItem);
+
+            var colorsItem = new ToolStripMenuItem("Color");
+            foreach (var choice in WorkspaceColors)
+            {
+                var color = TugleSettings.ToHex(choice.Color);
+                var colorItem = new ToolStripMenuItem(choice.Name)
+                {
+                    Checked = string.Equals(current.Color, color, StringComparison.OrdinalIgnoreCase)
+                };
+                colorItem.Click += (_, _) => SetTabGroupColor(current.Id, color);
+                colorsItem.DropDownItems.Add(colorItem);
+            }
+            var customColor = new ToolStripMenuItem("Custom color…");
+            customColor.Click += (_, _) => ChooseTabGroupColor(current.Id);
+            colorsItem.DropDownItems.Add(new ToolStripSeparator());
+            colorsItem.DropDownItems.Add(customColor);
+            menu.DropDownItems.Add(colorsItem);
+
+            var iconsItem = new ToolStripMenuItem("Icon");
+            foreach (var icon in WorkspaceIcons)
+            {
+                var iconItem = new ToolStripMenuItem(icon) { Checked = string.Equals(current.Icon, icon, StringComparison.Ordinal) };
+                iconItem.Click += (_, _) => SetTabGroupIcon(current.Id, icon);
+                iconsItem.DropDownItems.Add(iconItem);
+            }
+            menu.DropDownItems.Add(iconsItem);
+
+            var collapseItem = new ToolStripMenuItem(current.IsCollapsed ? "Expand tab group" : "Collapse tab group");
+            collapseItem.Click += (_, _) => SetTabGroupCollapsed(current.Id, !current.IsCollapsed);
+            menu.DropDownItems.Add(collapseItem);
+
+            var ungroupItem = new ToolStripMenuItem($"Remove {selectionLabel} from group");
+            ungroupItem.Click += (_, _) => UngroupTabs(selectedTabs);
+            menu.DropDownItems.Add(ungroupItem);
+
+            var deleteItem = new ToolStripMenuItem("Delete tab group (keep tabs)");
+            deleteItem.Click += (_, _) => DeleteTabGroup(current.Id);
+            menu.DropDownItems.Add(deleteItem);
+            menu.DropDownItems.Add(new ToolStripSeparator());
+        }
+
+        var createItem = new ToolStripMenuItem("New tab group…")
+        {
+            Enabled = _settings.TabGroups.Count < 48 && _settings.TabGroups.Count(group => group.WorkspaceId == tab.WorkspaceId) < 12
+        };
+        createItem.Click += (_, _) => CreateTabGroupForTabs(selectedTabs, tab.WorkspaceId);
+        menu.DropDownItems.Add(createItem);
+
+        var availableGroups = _settings.TabGroups
+            .Where(group => group.WorkspaceId == tab.WorkspaceId)
+            .OrderBy(group => group.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        if (availableGroups.Length > 0)
+        {
+            menu.DropDownItems.Add(new ToolStripSeparator());
+            foreach (var group in availableGroups)
+            {
+                var groupItem = new ToolStripMenuItem($"{group.Icon} {group.Name}")
+                {
+                    Checked = selectedTabs.All(item => item.GroupId == group.Id)
+                };
+                groupItem.Click += (_, _) => AssignTabsToGroup(selectedTabs, group.Id);
+                menu.DropDownItems.Add(groupItem);
+            }
+        }
+
+        var host = GetTabHost(tab);
+        if (host is null || availableGroups.Length == 0) return;
+
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        var rulesItem = new ToolStripMenuItem("Automatic grouping");
+        foreach (var group in availableGroups)
+        {
+            var ruleItem = new ToolStripMenuItem($"Always send {host} to {group.Name}")
+            {
+                Checked = _settings.ActiveWorkspace.Rules.Any(rule =>
+                    rule.Enabled && rule.TargetGroupId == group.Id &&
+                    string.Equals(rule.HostPattern, host, StringComparison.OrdinalIgnoreCase))
+            };
+            ruleItem.Click += (_, _) => ToggleWorkspaceRule(tab.WorkspaceId, host, group.Id);
+            rulesItem.DropDownItems.Add(ruleItem);
+        }
+        menu.DropDownItems.Add(rulesItem);
+    }
+
+    private TugleTabGroup? GetTabGroup(BrowserTab tab) =>
+        !_isPrivate && tab.GroupId is { } groupId
+            ? _settings.TabGroups.FirstOrDefault(group => group.Id == groupId && group.WorkspaceId == tab.WorkspaceId)
+            : null;
+
+    private Guid? GetValidTabGroupId(Guid? groupId, Guid? workspaceId = null) =>
+        !_isPrivate && groupId is { } id && _settings.TabGroups.Any(group =>
+            group.Id == id && group.WorkspaceId == (workspaceId ?? ActiveWorkspaceId))
+            ? id
+            : null;
+
+    private Guid CreateTabGroup(string name, string color, Guid? workspaceId = null)
+    {
+        var targetWorkspaceId = GetValidWorkspaceId(workspaceId);
+        if (_isPrivate || _settings.TabGroups.Count >= 48 || _settings.TabGroups.Count(group => group.WorkspaceId == targetWorkspaceId) >= 12 ||
+            !TryNormalizeTabGroupName(name, out var normalizedName) ||
+            !TryParseTabGroupColor(color, out var parsedColor) ||
+            HasTabGroupName(normalizedName, workspaceId: targetWorkspaceId))
+            return Guid.Empty;
+
+        var group = new TugleTabGroup
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = targetWorkspaceId,
+            Name = normalizedName,
+            Color = TugleSettings.ToHex(parsedColor),
+            Icon = WorkspaceIcons[_settings.TabGroups.Count(group => group.WorkspaceId == targetWorkspaceId) % WorkspaceIcons.Length]
+        };
+        _settings.TabGroups.Add(group);
+        SaveSettings();
+        return group.Id;
+    }
+
+    private bool RenameTabGroup(Guid groupId)
+    {
+        if (_isPrivate) return false;
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null) return false;
+
+        using var dialog = new WorkspaceNameDialog("Rename tab group", group.Name, _theme);
+        if (dialog.ShowDialog(this) != DialogResult.OK ||
+            !TryNormalizeTabGroupName(dialog.WorkspaceName, out var name))
+            return false;
+
+        if (HasTabGroupName(name, exceptGroupId: groupId, workspaceId: group.WorkspaceId))
+        {
+            MessageBox.Show(this, "That tab group name is already in use.", "Tab group", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+
+        group.Name = name;
+        UpdateTabButtonsForGroup(groupId);
+        SaveSettings();
+        return true;
+    }
+
+    private void CreateTabGroupForTabs(IReadOnlyCollection<BrowserTab> tabs, Guid workspaceId)
+    {
+        if (_isPrivate || tabs.Count == 0 || tabs.Any(tab => tab.IsClosing || tab.WorkspaceId != workspaceId) ||
+            _settings.TabGroups.Count >= 48 || _settings.TabGroups.Count(group => group.WorkspaceId == workspaceId) >= 12) return;
+
+        using var dialog = new WorkspaceNameDialog(
+            "New tab group",
+            $"Tab group {_settings.TabGroups.Count(group => group.WorkspaceId == workspaceId) + 1}",
+            _theme);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        if (HasTabGroupName(dialog.WorkspaceName, workspaceId: workspaceId))
+        {
+            MessageBox.Show(this, "That tab group name is already in use.", "Tab group", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var groupCount = _settings.TabGroups.Count(group => group.WorkspaceId == workspaceId);
+        var color = TugleSettings.ToHex(WorkspaceColors[groupCount % WorkspaceColors.Length].Color);
+        var groupId = CreateTabGroup(dialog.WorkspaceName, color, workspaceId);
+        if (groupId != Guid.Empty) AssignTabsToGroup(tabs, groupId);
+    }
+
+    private bool AssignTabToGroup(BrowserTab tab, Guid groupId) => AssignTabsToGroup([tab], groupId);
+
+    private bool AssignTabsToGroup(IEnumerable<BrowserTab> sourceTabs, Guid groupId)
+    {
+        if (_isPrivate) return false;
+        var tabs = sourceTabs.Distinct().Where(tab => !tab.IsClosing && _tabs.Contains(tab)).ToArray();
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (tabs.Length == 0 || group is null || tabs.Any(tab => tab.WorkspaceId != group.WorkspaceId))
+            return false;
+
+        var changed = false;
+        foreach (var tab in tabs)
+        {
+            if (tab.GroupId == groupId) continue;
+            tab.GroupId = groupId;
+            UpdateTabButton(tab);
+            changed = true;
+        }
+        if (!changed) return true;
+        CapturePreviousSession();
+        SaveSettings();
+        LayoutTabs();
+        return true;
+    }
+
+    private bool UngroupTab(BrowserTab tab) => UngroupTabs([tab]);
+
+    private bool UngroupTabs(IEnumerable<BrowserTab> sourceTabs)
+    {
+        if (_isPrivate) return false;
+        var tabs = sourceTabs.Distinct().Where(tab => !tab.IsClosing && _tabs.Contains(tab) && tab.GroupId is not null).ToArray();
+        if (tabs.Length == 0) return false;
+
+        foreach (var tab in tabs)
+        {
+            tab.GroupId = null;
+            UpdateTabButton(tab);
+        }
+        CapturePreviousSession();
+        SaveSettings();
+        LayoutTabs();
+        return true;
+    }
+
+    private bool SetTabGroupColor(Guid groupId, string color)
+    {
+        if (_isPrivate || !TryParseTabGroupColor(color, out var parsedColor)) return false;
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null) return false;
+
+        group.Color = TugleSettings.ToHex(parsedColor);
+        UpdateTabButtonsForGroup(groupId);
+        SaveSettings();
+        return true;
+    }
+
+    private void ChooseTabGroupColor(Guid groupId)
+    {
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null) return;
+        using var dialog = new ColorPickerDialog(
+            TugleSettings.FromHex(group.Color, _accent),
+            "Tab group color",
+            _theme);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            SetTabGroupColor(groupId, TugleSettings.ToHex(dialog.SelectedColor));
+    }
+
+    private bool SetTabGroupIcon(Guid groupId, string icon)
+    {
+        if (_isPrivate || !WorkspaceIcons.Contains(icon, StringComparer.Ordinal)) return false;
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null) return false;
+        group.Icon = icon;
+        UpdateTabButtonsForGroup(groupId);
+        SaveSettings();
+        return true;
+    }
+
+    private bool SetTabGroupCollapsed(Guid groupId, bool collapsed)
+    {
+        if (_isPrivate) return false;
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null || group.IsCollapsed == collapsed) return false;
+        group.IsCollapsed = collapsed;
+        UpdateTabButtonsForGroup(groupId);
+        LayoutTabs();
+        CapturePreviousSession();
+        SaveSettings();
+        return true;
+    }
+
+    private bool DeleteTabGroup(Guid groupId)
+    {
+        if (_isPrivate) return false;
+        var group = _settings.TabGroups.FirstOrDefault(item => item.Id == groupId);
+        if (group is null) return false;
+
+        _settings.TabGroups.Remove(group);
+        foreach (var tab in _tabs.Where(item => item.GroupId == groupId))
+        {
+            tab.GroupId = null;
+            UpdateTabButton(tab);
+        }
+        foreach (var closedTab in _settings.RecentlyClosedTabs.Where(item => item.GroupId == groupId))
+            closedTab.GroupId = null;
+        foreach (var workspace in _settings.Workspaces)
+            workspace.Rules.RemoveAll(rule => rule.TargetGroupId == groupId);
+        CapturePreviousSession();
+        SaveSettings();
+        return true;
+    }
+
+    private void UpdateTabButtonsForGroup(Guid groupId)
+    {
+        foreach (var tab in _tabs.Where(item => item.GroupId == groupId))
+            UpdateTabButton(tab);
+    }
+
+    private static bool TryNormalizeTabGroupName(string? value, out string name)
+    {
+        name = value?.Trim() ?? string.Empty;
+        if (name.Length == 0) return false;
+        if (name.Length > 40) name = name[..40];
+        return true;
+    }
+
+    private bool HasTabGroupName(string? value, Guid? exceptGroupId = null, Guid? workspaceId = null) =>
+        TryNormalizeTabGroupName(value, out var name) && _settings.TabGroups.Any(group =>
+            group.Id != exceptGroupId && group.WorkspaceId == (workspaceId ?? ActiveWorkspaceId) &&
+            string.Equals(group.Name, name, StringComparison.CurrentCultureIgnoreCase));
+
+    private static bool TryParseTabGroupColor(string? value, out Color color)
+    {
+        color = Color.Empty;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        try
+        {
+            color = ColorTranslator.FromHtml(value);
+            return !color.IsEmpty;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private IReadOnlyList<BrowserTab> GetTabsForOperation(BrowserTab focus)
+    {
+        if (_selectedTabs.Contains(focus))
+        {
+            var selected = _selectedTabs
+                .Where(tab => _tabs.Contains(tab) && !tab.IsClosing && tab.WorkspaceId == focus.WorkspaceId)
+                .ToArray();
+            if (selected.Length > 0) return selected;
+        }
+
+        return [focus];
+    }
+
+    private void SelectTabFromPointer(BrowserTab tab, Keys modifiers)
+    {
+        if (tab.IsClosing || !_tabs.Contains(tab) || (!_isPrivate && tab.WorkspaceId != ActiveWorkspaceId)) return;
+
+        var control = (modifiers & Keys.Control) == Keys.Control;
+        var range = (modifiers & Keys.Shift) == Keys.Shift;
+        if (range && _selectionAnchor is not null && _selectionAnchor.WorkspaceId == tab.WorkspaceId)
+        {
+            var tabs = GetDisplayedTabs().ToArray();
+            var first = Array.IndexOf(tabs, _selectionAnchor);
+            var last = Array.IndexOf(tabs, tab);
+            if (first >= 0 && last >= 0)
+            {
+                _selectedTabs.Clear();
+                foreach (var item in tabs.Skip(Math.Min(first, last)).Take(Math.Abs(last - first) + 1))
+                    _selectedTabs.Add(item);
+            }
+            else
+            {
+                _selectedTabs.Clear();
+                _selectedTabs.Add(tab);
+            }
+        }
+        else if (control)
+        {
+            if (!_selectedTabs.Add(tab)) _selectedTabs.Remove(tab);
+            _selectionAnchor ??= tab;
+        }
+        else
+        {
+            _selectedTabs.Clear();
+            _selectedTabs.Add(tab);
+            _selectionAnchor = tab;
+        }
+
+        UpdateTabSelectionVisuals();
+    }
+
+    private void ClearTabSelection()
+    {
+        if (_selectedTabs.Count == 0) return;
+        _selectedTabs.Clear();
+        _selectionAnchor = null;
+        UpdateTabSelectionVisuals();
+    }
+
+    private void UpdateTabSelectionVisuals()
+    {
+        foreach (var item in _tabs)
+            UpdateTabButton(item);
+    }
+
+    private static string? GetTabHost(BrowserTab? tab)
+    {
+        if (tab is null) return null;
+        var source = tab.DeferredNavigation ? tab.InitialNavigationTarget : tab.View.CoreWebView2?.Source;
+        return Uri.TryCreate(source, UriKind.Absolute, out var uri) &&
+            uri.Scheme is "http" or "https" && !string.IsNullOrWhiteSpace(uri.Host)
+            ? uri.Host.ToLowerInvariant()
+            : null;
+    }
+
+    private void ToggleWorkspaceRule(Guid workspaceId, string host, Guid groupId)
+    {
+        if (_isPrivate || GetWorkspace(workspaceId) is not { } workspace ||
+            !_settings.TabGroups.Any(group => group.Id == groupId && group.WorkspaceId == workspaceId)) return;
+
+        var existing = workspace.Rules.FirstOrDefault(rule => rule.TargetGroupId == groupId &&
+            string.Equals(rule.HostPattern, host, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            workspace.Rules.Remove(existing);
+        else
+            workspace.Rules.Add(new TugleWorkspaceRule
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspaceId,
+                TargetGroupId = groupId,
+                HostPattern = host,
+                Enabled = true
+            });
+        SaveSettings();
+    }
+
+    private TugleWorkspaceRoute? GetWorkspaceRoute(string? destination)
+    {
+        if (_isPrivate || !Uri.TryCreate(destination, UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("http" or "https"))
+        {
+            return null;
+        }
+
+        var host = uri.Host.ToLowerInvariant();
+        return _settings.WorkspaceRoutes
+            .Where(route => route.Enabled && GetWorkspace(route.TargetWorkspaceId) is not null &&
+                (route.TargetGroupId is null || _settings.TabGroups.Any(group =>
+                    group.Id == route.TargetGroupId && group.WorkspaceId == route.TargetWorkspaceId)) &&
+                HostMatchesWorkspaceRule(host, route.HostPattern))
+            .OrderByDescending(route => !route.HostPattern.StartsWith("*.", StringComparison.Ordinal))
+            .ThenByDescending(route => route.HostPattern.Length)
+            .FirstOrDefault();
+    }
+
+    private bool ToggleWorkspaceRoute(string host, Guid targetWorkspaceId, Guid? targetGroupId)
+    {
+        if (_isPrivate || GetWorkspace(targetWorkspaceId) is null || !IsSafeWorkspaceHostPattern(host) ||
+            targetGroupId is { } groupId && !_settings.TabGroups.Any(group =>
+                group.Id == groupId && group.WorkspaceId == targetWorkspaceId))
+        {
+            return false;
+        }
+
+        host = host.Trim().ToLowerInvariant();
+        var existing = _settings.WorkspaceRoutes.FirstOrDefault(route =>
+            string.Equals(route.HostPattern, host, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+        {
+            if (existing.TargetWorkspaceId == targetWorkspaceId && existing.TargetGroupId == targetGroupId)
+                _settings.WorkspaceRoutes.Remove(existing);
+            else
+            {
+                existing.TargetWorkspaceId = targetWorkspaceId;
+                existing.TargetGroupId = targetGroupId;
+                existing.Enabled = true;
+            }
+        }
+        else
+        {
+            if (_settings.WorkspaceRoutes.Count >= 36) return false;
+            _settings.WorkspaceRoutes.Add(new TugleWorkspaceRoute
+            {
+                Id = Guid.NewGuid(),
+                HostPattern = host,
+                TargetWorkspaceId = targetWorkspaceId,
+                TargetGroupId = targetGroupId,
+                Enabled = true
+            });
+        }
+
+        SaveSettings();
+        return true;
+    }
+
+    private async Task NavigateActiveTabAsync(string destination)
+    {
+        var tab = _activeTab;
+        if (tab?.View.CoreWebView2 is null || tab.IsClosing) return;
+
+        var route = GetWorkspaceRoute(destination);
+        if (route is not null)
+            await ApplyWorkspaceRouteAsync(tab, route);
+
+        if (tab.IsClosing || tab.View.CoreWebView2 is null) return;
+        tab.View.CoreWebView2.Navigate(destination);
+    }
+
+    private async Task ApplyWorkspaceRouteAsync(BrowserTab tab, TugleWorkspaceRoute route, bool activateDestination = true)
+    {
+        if (_isPrivate || tab.IsClosing || !_tabs.Contains(tab) || GetWorkspace(route.TargetWorkspaceId) is not { } target)
+            return;
+        var targetGroupId = GetValidTabGroupId(route.TargetGroupId, target.Id);
+        if (tab.WorkspaceId == target.Id)
+        {
+            if (tab.GroupId != targetGroupId)
+            {
+                tab.GroupId = targetGroupId;
+                UpdateTabButton(tab);
+                LayoutTabs();
+                CapturePreviousSession();
+                SaveSettings();
+            }
+            return;
+        }
+
+        if (HasSplitView) CloseSplitView(revealActive: false);
+        if (GetWorkspace(tab.WorkspaceId) is { } source && ReferenceEquals(tab, _activeTab))
+            source.LastActiveTabId = _tabs.FirstOrDefault(item => item.WorkspaceId == source.Id && !ReferenceEquals(item, tab) && !item.IsClosing)?.Id;
+
+        tab.WorkspaceId = target.Id;
+        tab.GroupId = targetGroupId;
+        if (targetGroupId is { } groupId && _settings.TabGroups.FirstOrDefault(group => group.Id == groupId) is { IsCollapsed: true })
+            SetTabGroupCollapsed(groupId, false);
+        target.LastActiveTabId = tab.Id;
+        if (activateDestination)
+            ClearTabSelection();
+        UpdateTabButton(tab);
+        LayoutTabs();
+        if (activateDestination)
+        {
+            await SwitchWorkspaceAsync(target.Id);
+            await ActivateTabAsync(tab);
+        }
+        CapturePreviousSession();
+        SaveSettings();
+    }
+
+    private void ShowWorkspaceMenu()
+    {
+        if (_isPrivate || IsDisposed) return;
+        PopulateWorkspaceMenu();
+        _workspaceMenu.Show(_workspaceButton, new Point(0, _workspaceButton.Height));
+    }
+
+    private void ShowCommandPalette()
+    {
+        if (IsDisposed || Disposing) return;
+        using var palette = new CommandPaletteDialog(BuildCommandPaletteEntries(), _theme, GuiScale);
+        if (palette.ShowDialog(this) == DialogResult.OK)
+            palette.SelectedEntry?.Action();
+    }
+
+    private IReadOnlyList<CommandPaletteEntry> BuildCommandPaletteEntries()
+    {
+        var entries = new List<CommandPaletteEntry>
+        {
+            new("Action", "New tab", "Ctrl+T", () => _ = RequestNewTabAsync()),
+            new("Action", "Toggle split view", "Ctrl+Shift+S · show two tabs side by side", () => _ = ToggleSplitWithNextTabAsync()),
+            new("Action", "New private window", "Ctrl+Shift+N", OpenPrivateWindow),
+            new("Action", "Show downloads", "Ctrl+J", ShowDownloadsMenu),
+            new("Action", "Show history", "Ctrl+H", ShowHistoryMenu),
+            new("Action", "Show bookmarks", "Saved pages", ShowLibraryMenu),
+            new("Action", "Browser settings", "Search, privacy, performance", ShowAccountsMenu),
+            new("Action", "Toggle fullscreen", "F11", RequestFullscreenToggle)
+        };
+
+        if (!_isPrivate)
+        {
+            foreach (var workspace in _settings.Workspaces)
+            {
+                var target = workspace;
+                entries.Add(new CommandPaletteEntry(
+                    "Workspace",
+                    $"{target.Icon} {target.Name}",
+                    target.Id == ActiveWorkspaceId ? "Current workspace" : "Switch workspace",
+                    () => _ = SwitchWorkspaceAsync(target.Id)));
+            }
+        }
+
+        foreach (var tab in _tabs.Where(tab => !tab.IsClosing).Take(60))
+        {
+            var target = tab;
+            var workspaceName = _isPrivate ? "Private" : GetWorkspace(target.WorkspaceId)?.Name ?? "Workspace";
+            entries.Add(new CommandPaletteEntry(
+                "Tab",
+                target.Title,
+                $"{workspaceName} · {GetTabHost(target) ?? (target.IsHome ? "Tugle Home" : "New tab")}",
+                () => _ = ActivateTabAsync(target)));
+        }
+
+        foreach (var visit in _history.RecentVisits.Take(12))
+        {
+            var target = visit;
+            entries.Add(new CommandPaletteEntry(
+                "History",
+                target.Title,
+                target.Url,
+                () => NavigateToHistoryEntry(target.Url)));
+        }
+
+        return entries;
+    }
+
+    private void PopulateWorkspaceMenu()
+    {
+        _workspaceMenu.Items.Clear();
+        if (_isPrivate) return;
+
+        var active = _settings.ActiveWorkspace;
+        var summary = new ToolStripMenuItem(GetWorkspaceMemorySummary(active.Id)) { Enabled = false };
+        _workspaceMenu.Items.Add(summary);
+        _workspaceMenu.Items.Add(new ToolStripSeparator());
+
+        foreach (var workspace in _settings.Workspaces)
+        {
+            var workspaceId = workspace.Id;
+            var item = new ToolStripMenuItem($"{workspace.Icon}  {workspace.Name}")
+            {
+                Checked = workspaceId == ActiveWorkspaceId,
+                ToolTipText = GetWorkspaceMemorySummary(workspaceId)
+            };
+            item.Click += async (_, _) => await SwitchWorkspaceAsync(workspaceId);
+            _workspaceMenu.Items.Add(item);
+        }
+
+        _workspaceMenu.Items.Add(new ToolStripSeparator());
+        var newWorkspace = new ToolStripMenuItem("New workspace…")
+        {
+            Enabled = _settings.Workspaces.Count < 12
+        };
+        newWorkspace.Click += (_, _) => PromptCreateWorkspace();
+        _workspaceMenu.Items.Add(newWorkspace);
+
+        var templates = new ToolStripMenuItem("New from template");
+        templates.Enabled = _settings.Workspaces.Count < 12;
+        foreach (var template in WorkspaceTemplates)
+        {
+            var selectedTemplate = template;
+            var item = new ToolStripMenuItem($"{selectedTemplate.Icon}  {selectedTemplate.Name}");
+            item.Click += (_, _) => PromptCreateWorkspace(selectedTemplate);
+            templates.DropDownItems.Add(item);
+        }
+        _workspaceMenu.Items.Add(templates);
+
+        var manage = new ToolStripMenuItem("Current workspace");
+        var rename = new ToolStripMenuItem("Rename…");
+        rename.Click += (_, _) => RenameWorkspace(active.Id);
+        manage.DropDownItems.Add(rename);
+
+        var color = new ToolStripMenuItem("Color");
+        foreach (var choice in WorkspaceColors)
+        {
+            var colorValue = TugleSettings.ToHex(choice.Color);
+            var item = new ToolStripMenuItem(choice.Name)
+            {
+                Checked = string.Equals(active.Color, colorValue, StringComparison.OrdinalIgnoreCase)
+            };
+            item.Click += (_, _) => SetWorkspaceColor(active.Id, colorValue);
+            color.DropDownItems.Add(item);
+        }
+        color.DropDownItems.Add(new ToolStripSeparator());
+        var customColor = new ToolStripMenuItem("Custom color…");
+        customColor.Click += (_, _) => ChooseWorkspaceColor(active.Id);
+        color.DropDownItems.Add(customColor);
+        manage.DropDownItems.Add(color);
+
+        var icon = new ToolStripMenuItem("Icon");
+        foreach (var iconValue in WorkspaceIcons)
+        {
+            var item = new ToolStripMenuItem(iconValue)
+            {
+                Checked = string.Equals(active.Icon, iconValue, StringComparison.Ordinal)
+            };
+            item.Click += (_, _) => SetWorkspaceIcon(active.Id, iconValue);
+            icon.DropDownItems.Add(item);
+        }
+        manage.DropDownItems.Add(icon);
+        manage.DropDownItems.Add(new ToolStripSeparator());
+
+        var useCurrent = new ToolStripMenuItem("Use current page at startup");
+        useCurrent.Click += (_, _) => SetWorkspaceStartupToCurrentPage(active.Id);
+        useCurrent.Enabled = TryGetPageDetails(_activeTab, out _, out _, out _);
+        manage.DropDownItems.Add(useCurrent);
+        var useHome = new ToolStripMenuItem("Use Tugle Home at startup") { Checked = string.IsNullOrWhiteSpace(active.StartupPageUrl) };
+        useHome.Click += (_, _) => SetWorkspaceStartupPage(active.Id, null);
+        manage.DropDownItems.Add(useHome);
+
+        var preferences = new ToolStripMenuItem("Workspace preferences");
+        preferences.DropDownItems.Add("Search engine", null, (_, _) => ShowActionFlyout(ActionFlyoutMode.Search));
+        preferences.DropDownItems.Add("Privacy", null, (_, _) => ShowActionFlyout(ActionFlyoutMode.Privacy));
+        preferences.DropDownItems.Add("Memory controls", null, (_, _) => ShowActionFlyout(ActionFlyoutMode.Performance));
+        manage.DropDownItems.Add(preferences);
+        _workspaceMenu.Items.Add(manage);
+
+        var rules = new ToolStripMenuItem("Automatic grouping rules");
+        var activeRules = active.Rules.Where(rule => rule.Enabled).OrderBy(rule => rule.HostPattern).ToArray();
+        if (activeRules.Length == 0)
+        {
+            rules.DropDownItems.Add(new ToolStripMenuItem("Create one from a tab’s Tab group menu") { Enabled = false });
+        }
+        else
+        {
+            foreach (var rule in activeRules)
+            {
+                var ruleCopy = rule;
+                var target = _settings.TabGroups.FirstOrDefault(group => group.Id == ruleCopy.TargetGroupId);
+                var item = new ToolStripMenuItem($"{ruleCopy.HostPattern} → {target?.Name ?? "Missing group"}")
+                {
+                    ToolTipText = "Click to remove this rule"
+                };
+                item.Click += (_, _) =>
+                {
+                    active.Rules.Remove(ruleCopy);
+                    SaveSettings();
+                };
+                rules.DropDownItems.Add(item);
+            }
+        }
+        _workspaceMenu.Items.Add(rules);
+
+        var routing = new ToolStripMenuItem("Smart link routing");
+        PopulateWorkspaceRoutingMenu(routing);
+        _workspaceMenu.Items.Add(routing);
+
+        _workspaceMenu.Items.Add(new ToolStripSeparator());
+        var exportItem = new ToolStripMenuItem("Export workspaces…");
+        exportItem.Click += (_, _) => ExportWorkspaceBackup();
+        var importItem = new ToolStripMenuItem("Import workspace backup…");
+        importItem.Click += async (_, _) => await ImportWorkspaceBackupAsync();
+        _workspaceMenu.Items.Add(exportItem);
+        _workspaceMenu.Items.Add(importItem);
+    }
+
+    private void PopulateWorkspaceRoutingMenu(ToolStripMenuItem menu)
+    {
+        menu.DropDownItems.Clear();
+        if (_isPrivate) return;
+
+        var host = GetTabHost(_activeTab);
+        if (host is not null)
+        {
+            var currentSite = new ToolStripMenuItem($"Always open {host} in");
+            var existing = _settings.WorkspaceRoutes.FirstOrDefault(route =>
+                string.Equals(route.HostPattern, host, StringComparison.OrdinalIgnoreCase));
+            foreach (var workspace in _settings.Workspaces)
+            {
+                var targetWorkspace = workspace;
+                var workspaceItem = new ToolStripMenuItem($"{targetWorkspace.Icon}  {targetWorkspace.Name}")
+                {
+                    Checked = existing?.TargetWorkspaceId == targetWorkspace.Id && existing.TargetGroupId is null
+                };
+                var groups = _settings.TabGroups.Where(group => group.WorkspaceId == targetWorkspace.Id)
+                    .OrderBy(group => group.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
+                if (groups.Length == 0)
+                    workspaceItem.Click += (_, _) => ToggleWorkspaceRoute(host, targetWorkspace.Id, null);
+                else
+                {
+                    var ungrouped = new ToolStripMenuItem("Workspace only")
+                    {
+                        Checked = workspaceItem.Checked
+                    };
+                    ungrouped.Click += (_, _) => ToggleWorkspaceRoute(host, targetWorkspace.Id, null);
+                    workspaceItem.DropDownItems.Add(ungrouped);
+                    workspaceItem.DropDownItems.Add(new ToolStripSeparator());
+                }
+
+                foreach (var group in groups)
+                {
+                    var targetGroup = group;
+                    var groupItem = new ToolStripMenuItem($"{targetGroup.Icon}  {targetGroup.Name}")
+                    {
+                        Checked = existing?.TargetWorkspaceId == targetWorkspace.Id && existing.TargetGroupId == targetGroup.Id
+                    };
+                    groupItem.Click += (_, _) => ToggleWorkspaceRoute(host, targetWorkspace.Id, targetGroup.Id);
+                    workspaceItem.DropDownItems.Add(groupItem);
+                }
+
+                currentSite.DropDownItems.Add(workspaceItem);
+            }
+            menu.DropDownItems.Add(currentSite);
+        }
+        else
+        {
+            menu.DropDownItems.Add(new ToolStripMenuItem("Open a website to create a route") { Enabled = false });
+        }
+
+        var routes = _settings.WorkspaceRoutes.Where(route => route.Enabled)
+            .OrderBy(route => route.HostPattern, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (routes.Length == 0) return;
+
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var route in routes)
+        {
+            var routeCopy = route;
+            var item = new ToolStripMenuItem($"{routeCopy.HostPattern} → {DescribeWorkspaceRoute(routeCopy)}");
+            var remove = new ToolStripMenuItem("Remove route");
+            remove.Click += (_, _) =>
+            {
+                _settings.WorkspaceRoutes.Remove(routeCopy);
+                SaveSettings();
+            };
+            item.DropDownItems.Add(remove);
+            menu.DropDownItems.Add(item);
+        }
+    }
+
+    private string DescribeWorkspaceRoute(TugleWorkspaceRoute route)
+    {
+        var workspace = GetWorkspace(route.TargetWorkspaceId);
+        var group = route.TargetGroupId is { } groupId
+            ? _settings.TabGroups.FirstOrDefault(item => item.Id == groupId && item.WorkspaceId == route.TargetWorkspaceId)
+            : null;
+        return group is null
+            ? workspace?.Name ?? "Missing workspace"
+            : $"{workspace?.Name ?? "Workspace"} / {group.Name}";
+    }
+
+    private async Task SwitchWorkspaceAsync(Guid workspaceId)
+    {
+        if (_isPrivate || GetWorkspace(workspaceId) is null || workspaceId == ActiveWorkspaceId) return;
+        if (HasSplitView) CloseSplitView(revealActive: false);
+
+        var previous = _settings.ActiveWorkspace;
+        if (_activeTab is { IsClosing: false } current && current.WorkspaceId == previous.Id)
+            previous.LastActiveTabId = current.Id;
+        _settings.CaptureActiveWorkspace();
+        _settings.ActiveWorkspaceId = workspaceId;
+        _settings.ApplyActiveWorkspace();
+        _tabScrollOffset = 0;
+        ClearTabSelection();
+        UpdateWorkspaceSwitcher();
+        await ApplyActiveWorkspaceTrackingPreventionAsync();
+
+        var activeWorkspace = _settings.ActiveWorkspace;
+        var tab = activeWorkspace.LastActiveTabId is { } rememberedId
+            ? _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && item.Id == rememberedId && !item.IsClosing)
+            : null;
+        tab ??= _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && !item.IsClosing);
+        if (tab is not null && GetTabGroup(tab) is { IsCollapsed: true } group)
+            tab = GetCollapsedGroupRepresentative(group.Id) ?? tab;
+        if (tab is null)
+            await OpenWorkspaceStartupTabAsync();
+        else
+            await ActivateTabAsync(tab);
+
+        CapturePreviousSession();
+        SaveSettings();
+    }
+
+    private async Task OpenWorkspaceStartupTabAsync()
+    {
+        var workspace = _isPrivate ? null : _settings.ActiveWorkspace;
+        var destination = workspace?.StartupPageUrl;
+        var tab = await OpenNewTabAsync(
+            showHome: false,
+            activate: false,
+            tabWorkspaceId: workspace?.Id);
+        if (tab?.View.CoreWebView2 is null) return;
+
+        if (string.IsNullOrWhiteSpace(destination))
+            ShowHome(tab);
+        else
+        {
+            tab.InitialNavigationTarget = destination;
+            tab.View.CoreWebView2.Navigate(destination);
+        }
+        await ActivateTabAsync(tab);
+    }
+
+    private async Task ApplyActiveWorkspaceTrackingPreventionAsync()
+    {
+        if (_isPrivate) return;
+        var profile = _tabs.Select(tab => tab.View.CoreWebView2?.Profile).FirstOrDefault(item => item is not null);
+        if (profile is null) return;
+        try
+        {
+            profile.PreferredTrackingPreventionLevel = Enum.Parse<CoreWebView2TrackingPreventionLevel>(_settings.TrackingPrevention);
+        }
+        catch
+        {
+            await Task.CompletedTask;
+        }
+    }
+
+    private void PromptCreateWorkspace(WorkspaceTemplate? template = null)
+    {
+        if (_isPrivate || _settings.Workspaces.Count >= 12) return;
+        var suggestedName = template?.Name ?? $"Workspace {_settings.Workspaces.Count + 1}";
+        using var dialog = new WorkspaceNameDialog("New workspace", suggestedName, _theme);
+        if (dialog.ShowDialog(this) != DialogResult.OK || !TryNormalizeWorkspaceName(dialog.WorkspaceName, out var name)) return;
+        if (HasWorkspaceName(name))
+        {
+            MessageBox.Show(this, "That workspace name is already in use.", "Workspace", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var color = template?.Color ?? WorkspaceColors[_settings.Workspaces.Count % WorkspaceColors.Length].Color;
+        var icon = template?.Icon ?? WorkspaceIcons[_settings.Workspaces.Count % WorkspaceIcons.Length];
+        var workspace = new TugleWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            Color = TugleSettings.ToHex(color),
+            Icon = icon,
+            SearchEngine = _settings.SearchEngine,
+            TrackingPrevention = _settings.TrackingPrevention,
+            LowMemoryMode = _settings.LowMemoryMode,
+            DiscardInactiveTabs = _settings.DiscardInactiveTabs,
+            UseWorkspaceMemorySettings = true
+        };
+        _settings.Workspaces.Add(workspace);
+        if (template is not null)
+        {
+            foreach (var groupName in template.GroupNames.Take(12))
+            {
+                if (_settings.TabGroups.Count >= 48) break;
+                var groupIndex = _settings.TabGroups.Count(group => group.WorkspaceId == workspace.Id);
+                _settings.TabGroups.Add(new TugleTabGroup
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspace.Id,
+                    Name = groupName,
+                    Color = TugleSettings.ToHex(WorkspaceColors[groupIndex % WorkspaceColors.Length].Color),
+                    Icon = WorkspaceIcons[groupIndex % WorkspaceIcons.Length]
+                });
+            }
+        }
+        SaveSettings();
+        _ = SwitchWorkspaceAsync(workspace.Id);
+    }
+
+    private bool RenameWorkspace(Guid workspaceId)
+    {
+        var workspace = GetWorkspace(workspaceId);
+        if (workspace is null) return false;
+        using var dialog = new WorkspaceNameDialog("Rename workspace", workspace.Name, _theme);
+        if (dialog.ShowDialog(this) != DialogResult.OK || !TryNormalizeWorkspaceName(dialog.WorkspaceName, out var name)) return false;
+        if (HasWorkspaceName(name, workspaceId))
+        {
+            MessageBox.Show(this, "That workspace name is already in use.", "Workspace", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+        workspace.Name = name;
+        UpdateWorkspaceSwitcher();
+        SaveSettings();
+        return true;
+    }
+
+    private bool SetWorkspaceColor(Guid workspaceId, string color)
+    {
+        var workspace = GetWorkspace(workspaceId);
+        if (workspace is null || !TryParseTabGroupColor(color, out var parsed)) return false;
+        workspace.Color = TugleSettings.ToHex(parsed);
+        UpdateWorkspaceSwitcher();
+        SaveSettings();
+        return true;
+    }
+
+    private void ChooseWorkspaceColor(Guid workspaceId)
+    {
+        var workspace = GetWorkspace(workspaceId);
+        if (workspace is null) return;
+        using var dialog = new ColorPickerDialog(TugleSettings.FromHex(workspace.Color, _accent), "Workspace color", _theme);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            SetWorkspaceColor(workspaceId, TugleSettings.ToHex(dialog.SelectedColor));
+    }
+
+    private bool SetWorkspaceIcon(Guid workspaceId, string icon)
+    {
+        var workspace = GetWorkspace(workspaceId);
+        if (workspace is null || !WorkspaceIcons.Contains(icon, StringComparer.Ordinal)) return false;
+        workspace.Icon = icon;
+        UpdateWorkspaceSwitcher();
+        SaveSettings();
+        return true;
+    }
+
+    private void SetWorkspaceStartupToCurrentPage(Guid workspaceId)
+    {
+        if (!TryGetPageDetails(_activeTab, out var url, out _, out _)) return;
+        SetWorkspaceStartupPage(workspaceId, url);
+    }
+
+    private bool SetWorkspaceStartupPage(Guid workspaceId, string? url)
+    {
+        var workspace = GetWorkspace(workspaceId);
+        if (workspace is null) return false;
+        if (!string.IsNullOrWhiteSpace(url) &&
+            (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https" or "file")))
+            return false;
+        workspace.StartupPageUrl = string.IsNullOrWhiteSpace(url) ? null : url.Trim();
+        SaveSettings();
+        return true;
+    }
+
+    private static bool TryNormalizeWorkspaceName(string? value, out string name)
+    {
+        name = value?.Trim() ?? string.Empty;
+        if (name.Length == 0) return false;
+        if (name.Length > 40) name = name[..40];
+        return true;
+    }
+
+    private bool HasWorkspaceName(string? value, Guid? exceptWorkspaceId = null) =>
+        TryNormalizeWorkspaceName(value, out var name) && _settings.Workspaces.Any(workspace =>
+            workspace.Id != exceptWorkspaceId && string.Equals(workspace.Name, name, StringComparison.CurrentCultureIgnoreCase));
+
+    private string GetWorkspaceMemorySummary(Guid workspaceId)
+    {
+        var tabs = _tabs.Where(tab => !tab.IsClosing && tab.WorkspaceId == workspaceId).ToArray();
+        var suspended = tabs.Count(tab => tab.IsSuspended);
+        var discarded = tabs.Count(tab => tab.IsDiscarded);
+        return tabs.Length == 0
+            ? "No open tabs"
+            : $"{tabs.Length} tab{(tabs.Length == 1 ? string.Empty : "s")} · savings: {suspended} paused, {discarded} unloaded";
+    }
+
+    private void ExportWorkspaceBackup()
+    {
+        if (_isPrivate) return;
+        CapturePreviousSession();
+        var backup = new TugleWorkspaceBackup
+        {
+            FormatVersion = 2,
+            Workspaces = _settings.Workspaces.Select(workspace => new TugleWorkspace
+            {
+                Id = workspace.Id,
+                Name = workspace.Name,
+                Color = workspace.Color,
+                Icon = workspace.Icon,
+                StartupPageUrl = workspace.StartupPageUrl,
+                SearchEngine = workspace.SearchEngine,
+                TrackingPrevention = workspace.TrackingPrevention,
+                UseWorkspaceMemorySettings = workspace.UseWorkspaceMemorySettings,
+                LowMemoryMode = workspace.LowMemoryMode,
+                DiscardInactiveTabs = workspace.DiscardInactiveTabs,
+                LastActiveTabId = workspace.LastActiveTabId,
+                Rules = workspace.Rules.Select(rule => new TugleWorkspaceRule
+                {
+                    Id = rule.Id,
+                    WorkspaceId = rule.WorkspaceId,
+                    TargetGroupId = rule.TargetGroupId,
+                    HostPattern = rule.HostPattern,
+                    Enabled = rule.Enabled
+                }).ToList()
+            }).ToList(),
+            TabGroups = _settings.TabGroups.Select(group => new TugleTabGroup
+            {
+                Id = group.Id,
+                WorkspaceId = group.WorkspaceId,
+                Name = group.Name,
+                Color = group.Color,
+                Icon = group.Icon,
+                IsCollapsed = group.IsCollapsed
+            }).ToList(),
+            Routes = _settings.WorkspaceRoutes.Select(route => new TugleWorkspaceRoute
+            {
+                Id = route.Id,
+                HostPattern = route.HostPattern,
+                TargetWorkspaceId = route.TargetWorkspaceId,
+                TargetGroupId = route.TargetGroupId,
+                Enabled = route.Enabled
+            }).ToList(),
+            Tabs = _settings.PreviousSessionTabs.Select(tab => new TugleSessionTab
+            {
+                Id = tab.Id,
+                WorkspaceId = tab.WorkspaceId,
+                Url = tab.Url,
+                IsHome = tab.IsHome,
+                IsActive = tab.IsActive,
+                IsPinned = tab.IsPinned,
+                GroupId = tab.GroupId,
+                Title = tab.Title
+            }).ToList()
+        };
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export workspaces",
+            Filter = "Tugle workspace backup (*.tugle-workspace.json)|*.tugle-workspace.json|JSON files (*.json)|*.json",
+            FileName = "Tugle-workspaces.tugle-workspace.json",
+            AddExtension = true,
+            DefaultExt = "json",
+            OverwritePrompt = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(dialog.FileName, JsonSerializer.Serialize(backup, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Tugle could not export that backup.\n\n" + ex.Message, "Export workspaces", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    private async Task ImportWorkspaceBackupAsync()
+    {
+        if (_isPrivate || _settings.Workspaces.Count >= 12) return;
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import workspace backup",
+            Filter = "Tugle workspace backup (*.tugle-workspace.json;*.json)|*.tugle-workspace.json;*.json|All files (*.*)|*.*",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        TugleWorkspaceBackup? backup;
+        try
+        {
+            backup = JsonSerializer.Deserialize<TugleWorkspaceBackup>(File.ReadAllText(dialog.FileName), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "That file is not a readable Tugle workspace backup.\n\n" + ex.Message, "Import workspaces", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (backup is null || backup.FormatVersion is not (1 or 2))
+        {
+            MessageBox.Show(this, "This workspace backup uses an unsupported format.", "Import workspaces", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var importedWorkspaceIds = await ImportWorkspaceBackupAsync(backup);
+        if (importedWorkspaceIds.Count == 0)
+        {
+            MessageBox.Show(this, "No usable workspaces were found in that backup.", "Import workspaces", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        await SwitchWorkspaceAsync(importedWorkspaceIds[0]);
+        CapturePreviousSession();
+        SaveSettings();
+        MessageBox.Show(this, $"Imported {importedWorkspaceIds.Count} workspace{(importedWorkspaceIds.Count == 1 ? string.Empty : "s")}.", "Import workspaces", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private async Task<IReadOnlyList<Guid>> ImportWorkspaceBackupAsync(TugleWorkspaceBackup backup)
+    {
+        var workspaceMap = new Dictionary<Guid, Guid>();
+        var imported = new List<Guid>();
+        foreach (var source in (backup.Workspaces ?? []).Take(12))
+        {
+            if (_settings.Workspaces.Count >= 12 || source.Id == Guid.Empty || !TryNormalizeWorkspaceName(source.Name, out var name) ||
+                !TryParseTabGroupColor(source.Color, out var color) || workspaceMap.ContainsKey(source.Id)) continue;
+            var uniqueName = name;
+            var suffix = 2;
+            while (HasWorkspaceName(uniqueName)) uniqueName = $"{name} ({suffix++})";
+            var workspace = new TugleWorkspace
+            {
+                Id = Guid.NewGuid(),
+                Name = uniqueName,
+                Color = TugleSettings.ToHex(color),
+                Icon = WorkspaceIcons.Contains(source.Icon, StringComparer.Ordinal) ? source.Icon : "●",
+                StartupPageUrl = IsWorkspaceRestorableAddress(source.StartupPageUrl) ? source.StartupPageUrl!.Trim() : null,
+                SearchEngine = SearchProvider.Normalize(source.SearchEngine),
+                TrackingPrevention = source.TrackingPrevention is "Basic" or "Balanced" or "Strict" ? source.TrackingPrevention : "Balanced",
+                UseWorkspaceMemorySettings = source.UseWorkspaceMemorySettings,
+                LowMemoryMode = source.LowMemoryMode,
+                DiscardInactiveTabs = source.DiscardInactiveTabs
+            };
+            _settings.Workspaces.Add(workspace);
+            workspaceMap[source.Id] = workspace.Id;
+            imported.Add(workspace.Id);
+        }
+
+        var groupMap = new Dictionary<Guid, Guid>();
+        foreach (var source in (backup.TabGroups ?? []).Take(48))
+        {
+            if (source.Id == Guid.Empty || !workspaceMap.TryGetValue(source.WorkspaceId, out var workspaceId) ||
+                groupMap.ContainsKey(source.Id) || !TryNormalizeTabGroupName(source.Name, out var name) ||
+                !TryParseTabGroupColor(source.Color, out var color) ||
+                _settings.TabGroups.Count >= 48 || _settings.TabGroups.Count(group => group.WorkspaceId == workspaceId) >= 12) continue;
+            var uniqueName = name;
+            var suffix = 2;
+            while (HasTabGroupName(uniqueName, workspaceId: workspaceId)) uniqueName = $"{name} ({suffix++})";
+            var group = new TugleTabGroup
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspaceId,
+                Name = uniqueName,
+                Color = TugleSettings.ToHex(color),
+                Icon = WorkspaceIcons.Contains(source.Icon, StringComparer.Ordinal) ? source.Icon : "●",
+                IsCollapsed = source.IsCollapsed
+            };
+            _settings.TabGroups.Add(group);
+            groupMap[source.Id] = group.Id;
+        }
+
+        foreach (var source in backup.Workspaces ?? [])
+        {
+            if (!workspaceMap.TryGetValue(source.Id, out var workspaceId) || GetWorkspace(workspaceId) is not { } workspace) continue;
+            foreach (var rule in (source.Rules ?? []).Take(48))
+            {
+                if (!groupMap.TryGetValue(rule.TargetGroupId, out var targetGroupId) ||
+                    !IsSafeWorkspaceHostPattern(rule.HostPattern)) continue;
+                workspace.Rules.Add(new TugleWorkspaceRule
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    TargetGroupId = targetGroupId,
+                    HostPattern = rule.HostPattern.Trim().ToLowerInvariant(),
+                    Enabled = rule.Enabled
+                });
+            }
+        }
+
+        foreach (var source in (backup.Routes ?? []).Take(36))
+        {
+            if (_settings.WorkspaceRoutes.Count >= 36 || !workspaceMap.TryGetValue(source.TargetWorkspaceId, out var targetWorkspaceId) ||
+                !IsSafeWorkspaceHostPattern(source.HostPattern) ||
+                _settings.WorkspaceRoutes.Any(route => string.Equals(route.HostPattern, source.HostPattern, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            var targetGroupId = source.TargetGroupId is { } originalGroup && groupMap.TryGetValue(originalGroup, out var mappedGroup)
+                ? mappedGroup
+                : (Guid?)null;
+            _settings.WorkspaceRoutes.Add(new TugleWorkspaceRoute
+            {
+                Id = Guid.NewGuid(),
+                HostPattern = source.HostPattern.Trim().ToLowerInvariant(),
+                TargetWorkspaceId = targetWorkspaceId,
+                TargetGroupId = targetGroupId,
+                Enabled = source.Enabled
+            });
+        }
+
+        foreach (var source in (backup.Tabs ?? []).Take(80))
+        {
+            if (!workspaceMap.TryGetValue(source.WorkspaceId, out var workspaceId) ||
+                (!source.IsHome && !IsWorkspaceRestorableAddress(source.Url))) continue;
+            var groupId = source.GroupId is { } originalGroup && groupMap.TryGetValue(originalGroup, out var mappedGroup)
+                ? mappedGroup
+                : (Guid?)null;
+            var tab = await OpenNewTabAsync(
+                showHome: false,
+                activate: false,
+                deferInitialization: true,
+                workspaceId: groupId,
+                tabWorkspaceId: workspaceId);
+            if (tab is null) continue;
+            tab.Id = source.Id == Guid.Empty || _tabs.Any(existing => !ReferenceEquals(existing, tab) && existing.Id == source.Id)
+                ? Guid.NewGuid()
+                : source.Id;
+            tab.Title = string.IsNullOrWhiteSpace(source.Title) ? tab.Title : source.Title.Trim()[..Math.Min(120, source.Title.Trim().Length)];
+            tab.IsPinned = source.IsPinned;
+            tab.IsHome = source.IsHome;
+            tab.DeferredNavigation = true;
+            tab.InitialNavigationTarget = source.Url;
+            UpdateTabButton(tab);
+        }
+        return imported;
+    }
+
+    private static bool IsWorkspaceRestorableAddress(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" or "file";
+
+    private static bool IsSafeWorkspaceHostPattern(string? value)
+    {
+        var pattern = value?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(pattern) || pattern.Contains('/') || pattern.Contains(':') || pattern.Contains('*', StringComparison.Ordinal) && !pattern.StartsWith("*.", StringComparison.Ordinal))
+            return false;
+        var host = pattern.StartsWith("*.", StringComparison.Ordinal) ? pattern[2..] : pattern;
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return !pattern.StartsWith("*.", StringComparison.Ordinal);
+        var type = Uri.CheckHostName(host);
+        return (type is UriHostNameType.Dns or UriHostNameType.IPv4 or UriHostNameType.IPv6) &&
+            (!pattern.StartsWith("*.", StringComparison.Ordinal) || type == UriHostNameType.Dns && host.Contains('.'));
     }
 
     private async Task DuplicateTabAsync(BrowserTab source)
@@ -1611,7 +3407,10 @@ public sealed class MainForm : SnapWindowForm
             destination = parsed;
         var showHome = destination is null;
         var sourceIndex = _tabs.IndexOf(source);
-        var duplicate = await OpenNewTabAsync(showHome);
+        var duplicate = await OpenNewTabAsync(
+            showHome,
+            workspaceId: _isPrivate ? null : source.GroupId,
+            tabWorkspaceId: _isPrivate ? null : source.WorkspaceId);
         if (duplicate?.View.CoreWebView2 is null) return;
 
         // Keep the duplicate beside its source, then let the normal navigation
@@ -1639,8 +3438,15 @@ public sealed class MainForm : SnapWindowForm
 
     private void OrderPinnedTabs()
     {
-        var ordered = _tabs.Where(tab => tab.IsPinned)
-            .Concat(_tabs.Where(tab => !tab.IsPinned))
+        Guid[] workspaceOrder = _isPrivate
+            ? [Guid.Empty]
+            : _settings.Workspaces.Select(workspace => workspace.Id)
+                .Concat(_tabs.Where(tab => GetWorkspace(tab.WorkspaceId) is null).Select(tab => tab.WorkspaceId))
+                .Distinct()
+                .ToArray();
+        var ordered = workspaceOrder
+            .SelectMany(workspaceId => _tabs.Where(tab => tab.WorkspaceId == workspaceId && tab.IsPinned)
+                .Concat(_tabs.Where(tab => tab.WorkspaceId == workspaceId && !tab.IsPinned)))
             .ToArray();
         if (ordered.SequenceEqual(_tabs))
         {
@@ -1753,7 +3559,7 @@ public sealed class MainForm : SnapWindowForm
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var destination) ||
             (destination.Scheme != Uri.UriSchemeHttp && destination.Scheme != Uri.UriSchemeHttps)) return;
-        ActiveWebView?.CoreWebView2?.Navigate(destination.ToString());
+        _ = NavigateActiveTabAsync(destination.ToString());
     }
 
     private void NavigateToSearchEntry(string query)
@@ -1775,6 +3581,17 @@ public sealed class MainForm : SnapWindowForm
     private void ShowAccountsMenu()
     {
         ShowActionFlyout(ActionFlyoutMode.Accounts);
+    }
+
+    private void ShowBrowserSettings() => ShowActionFlyout(ActionFlyoutMode.BrowserSettings);
+
+    private void ShowPerformanceMenu() => ShowActionFlyout(ActionFlyoutMode.Performance);
+
+    private void ShowGoogleAccount()
+    {
+        ShowActionFlyout(ActionFlyoutMode.GoogleAccount);
+        var core = _tabs.FirstOrDefault(tab => !tab.IsClosing && tab.View.CoreWebView2 is not null)?.View.CoreWebView2;
+        if (core is not null) _ = RefreshGoogleConnectionStateAsync(core);
     }
 
     private async Task CheckForUpdatesAsync(bool showNoUpdateMessage)
@@ -1873,27 +3690,33 @@ public sealed class MainForm : SnapWindowForm
         await ConnectGoogleAccountAsync();
     }
 
-    private Task ConnectGoogleAccountAsync()
+    private async Task ConnectGoogleAccountAsync()
     {
+        if (_openingGoogleAccount) return;
+        _openingGoogleAccount = true;
         HideActionFlyout();
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F&service=accountsettings",
-                UseShellExecute = true
-            });
-            MessageBox.Show(this,
-                "Google opened in your default browser. Return to Tugle when you are done.",
-                "Google sign-in",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            var source = _googleAccountTab is { IsClosing: false } && !_googleAccountTab.View.IsDisposed
+                ? _googleAccountTab.View.CoreWebView2?.Source : null;
+            var reusable = Uri.TryCreate(source, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
+                uri.Host is "accounts.google.com" or "myaccount.google.com";
+            // Do not replace a page if the user has since navigated this tab elsewhere.
+            if (_googleAccountTab is null || _googleAccountTab.IsClosing || !_tabs.Contains(_googleAccountTab) || !reusable)
+                _googleAccountTab = await OpenNewTabAsync(showHome: false);
+            else
+                await ActivateTabAsync(_googleAccountTab);
+            if (_googleAccountTab?.View.CoreWebView2 is null) return;
+            _googleSignInBlocked = false;
+            var destination = _googleSignedIn == true ? "https://myaccount.google.com/" : GoogleSession.SignInUrl;
+            _googleAccountTab.InitialNavigationTarget = destination;
+            _googleAccountTab.View.CoreWebView2.Navigate(destination);
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, "Google could not be opened.\n\n" + ex.Message, "Google sign-in", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        return Task.CompletedTask;
+        finally { _openingGoogleAccount = false; }
     }
 
     private static bool IsGoogleHost(string? source)
@@ -1906,11 +3729,12 @@ public sealed class MainForm : SnapWindowForm
         try
         {
             var signedIn = await GoogleSession.IsConnectedAsync(core);
-            if (signedIn == _settings.GoogleConnected) return;
-
-            _settings.GoogleConnected = signedIn;
-            _settings.Save();
-            if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Accounts)
+            var blocked = GoogleSession.IsAccountUrl(core.Source) && !signedIn && await GoogleSession.IsSignInBlockedAsync(core);
+            if (IsDisposed) return;
+            var changed = signedIn != _googleSignedIn || blocked != _googleSignInBlocked;
+            _googleSignedIn = signedIn;
+            _googleSignInBlocked = blocked;
+            if (changed && _actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.GoogleAccount)
                 PopulateActionFlyout();
         }
         catch
@@ -1921,25 +3745,27 @@ public sealed class MainForm : SnapWindowForm
 
     private async void DisconnectGoogleAccount()
     {
+        if (MessageBox.Show(this, "Sign out of Google websites in this Tugle profile?", "Sign out of Google", MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         try
         {
             var core = ActiveWebView?.CoreWebView2;
             if (core is not null)
             {
-                var cookies = await core.CookieManager.GetCookiesAsync("https://accounts.google.com/");
-                foreach (var cookie in cookies.Where(cookie =>
-                    cookie.Domain.Contains("google.com", StringComparison.OrdinalIgnoreCase)))
-                    core.CookieManager.DeleteCookie(cookie);
+                if (!await GoogleSession.ClearCookiesAsync(core) && !IsDisposed)
+                    MessageBox.Show(this, "Google is still signed in. Please try again.", "Google sign-out", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
         catch
         {
-            // Clearing Google cookies is best effort.
+            if (!IsDisposed)
+                MessageBox.Show(this, "Google sign-out could not be completed. Please try again.", "Google sign-out", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        _settings.GoogleConnected = false;
-        _settings.Save();
-        PopulateActionFlyout();
+        if (IsDisposed) return;
+        var current = ActiveWebView?.CoreWebView2;
+        if (current is not null) await RefreshGoogleConnectionStateAsync(current);
+        if (_actionFlyoutMode == ActionFlyoutMode.GoogleAccount) PopulateActionFlyout();
     }
 
     private void ChooseCustomThemeColor()
@@ -2143,14 +3969,14 @@ public sealed class MainForm : SnapWindowForm
                 break;
 
             case ActionFlyoutMode.Privacy:
-                _actionFlyoutTitle.Text = _isPrivate ? "Private browsing" : "Privacy and protection";
+                _actionFlyoutTitle.Text = _isPrivate ? "Private browsing" : $"Privacy · {_settings.ActiveWorkspace.Name}";
                 if (_isPrivate)
                 {
                     AddActionFlyoutInfo("Tabs and browsing history aren’t saved. Downloads stay on your device.");
                     break;
                 }
 
-                AddActionFlyoutButton("‹  Settings", "Back to settings", ShowAccountsMenu);
+                AddActionFlyoutButton("‹  Browser settings", "Back", ShowBrowserSettings);
                 AddActionFlyoutButton("New private window", "Ctrl+Shift+N", OpenPrivateWindow);
                 AddActionFlyoutSectionLabel("Tracking prevention", "");
                 AddCompactActions(new[] { "Basic", "Balanced", "Strict" }.Select(level =>
@@ -2191,22 +4017,16 @@ public sealed class MainForm : SnapWindowForm
                 break;
 
             case ActionFlyoutMode.Search:
-                _actionFlyoutTitle.Text = "Search engine";
-                AddActionFlyoutButton("‹  Settings", "Back to settings", ShowAccountsMenu);
-                AddActionFlyoutSectionLabel("Default search", "");
-                foreach (var (name, description) in SearchProviders)
+                _actionFlyoutTitle.Text = _isPrivate ? "Search engine" : $"Search · {_settings.ActiveWorkspace.Name}";
+                AddActionFlyoutButton("‹  Browser settings", "Back", ShowBrowserSettings);
+                foreach (var name in SearchProvider.Names)
                 {
                     AddActionFlyoutButton(
                         name,
-                        description,
+                        "Use " + name + " for searches",
                         () => SetSearchProvider(name),
                         selected: string.Equals(name, _settings.SearchEngine, StringComparison.Ordinal));
                 }
-                AddActionFlyoutButton(
-                    "Custom engine…",
-                    "Use a URL containing {query}",
-                    ChooseCustomSearchProvider,
-                    selected: _settings.SearchEngine == "Custom");
                 break;
 
             case ActionFlyoutMode.GuiScale:
@@ -2285,38 +4105,54 @@ public sealed class MainForm : SnapWindowForm
 
             case ActionFlyoutMode.Accounts:
                 _actionFlyoutTitle.Text = "Settings";
-                AddActionFlyoutSectionLabel(
-                    "GOOGLE ACCOUNT",
-                    _settings.GoogleConnected ? "Connected on this device" : "Not connected");
-                if (_settings.GoogleConnected)
-                {
-                    AddActionFlyoutButton(
-                        "Manage Google account",
-                        "Open Google account settings in your default browser",
-                        ConnectGoogleAccount,
-                        prominent: true);
-                    AddActionFlyoutButton(
-                        "Disconnect Google",
-                        "Remove Google cookies from this Tugle profile",
-                        DisconnectGoogleAccount,
-                        destructive: true);
-                }
-                else
-                {
-                    AddActionFlyoutButton(
-                        "Connect Google",
-                        "Open Google sign-in in your default browser",
-                        ConnectGoogleAccount,
-                        prominent: true);
-                }
-                AddActionFlyoutSectionLabel("Browser", "");
+                AddActionFlyoutButton("Google account", "Google websites in Tugle", ShowGoogleAccount);
+                AddActionFlyoutButton("Browser settings", "Search, privacy and updates", ShowBrowserSettings);
+                break;
+
+            case ActionFlyoutMode.GoogleAccount:
+                _actionFlyoutTitle.Text = "Google account";
+                AddActionFlyoutButton("‹  Settings", "Back", ShowAccountsMenu);
+                AddActionFlyoutInfo(_googleSignInBlocked ? "Google blocked sign-in in this embedded browser." :
+                    _googleSignedIn == true ? "Signed in to Google websites in Tugle." : "Sign in to use Google websites in Tugle.");
+                AddActionFlyoutButton(_googleSignedIn == true ? "Manage account" : "Sign in to Google", "Open in a Tugle tab", ConnectGoogleAccount, prominent: true);
+                if (_googleSignedIn == true)
+                    AddActionFlyoutButton("Sign out", "Sign out of Google in this Tugle profile", DisconnectGoogleAccount);
+                break;
+
+            case ActionFlyoutMode.BrowserSettings:
+                _actionFlyoutTitle.Text = "Browser settings";
+                AddActionFlyoutButton("‹  Settings", "Back", ShowAccountsMenu);
+                AddActionFlyoutButton("Search engine", "Used by Home and the address bar", ShowSearchMenu).ValueText = _settings.SearchEngine;
+                AddActionFlyoutButton("Performance", "Memory saver for inactive tabs", ShowPerformanceMenu)
+                    .ValueText = _settings.LowMemoryMode ? "On" : "Off";
                 AddActionFlyoutButton("Privacy and protection", "Private windows, tracking controls, and browsing-data cleanup", ShowPrivacyMenu);
-                AddActionFlyoutButton("Search engine", "Choose the address-bar search provider", ShowSearchMenu);
-                AddActionFlyoutSectionLabel("Tugle", typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "1.2.1");
+                AddActionFlyoutSectionLabel("Tugle", typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "2.3.0");
                 AddActionFlyoutButton(
                     "Check for updates",
                     "Download the latest Tugle package",
                     () => _ = CheckForUpdatesAsync(showNoUpdateMessage: true));
+                break;
+
+            case ActionFlyoutMode.Performance:
+                _actionFlyoutTitle.Text = _isPrivate ? "Performance" : $"Performance · {_settings.ActiveWorkspace.Name}";
+                AddActionFlyoutButton("‹  Browser settings", "Back", ShowBrowserSettings);
+                var memorySaver = AddActionFlyoutButton(
+                    "Memory saver",
+                    "Pause inactive tabs to free memory",
+                    () => SetMemorySaverEnabled(!_settings.LowMemoryMode));
+                memorySaver.ValueText = _settings.LowMemoryMode ? "On" : "Off";
+                var tabDiscarding = AddActionFlyoutButton(
+                    "Discard inactive tabs",
+                    "Reload tabs left inactive for 30 minutes",
+                    () => SetTabDiscardingEnabled(!_settings.DiscardInactiveTabs));
+                tabDiscarding.ValueText = _settings.DiscardInactiveTabs ? "On" : "Off";
+                if (!_isPrivate)
+                    AddActionFlyoutInfo(GetWorkspaceMemorySummary(ActiveWorkspaceId));
+                AddActionFlyoutInfo(_settings.LowMemoryMode
+                    ? _settings.DiscardInactiveTabs
+                        ? "Inactive, unpinned tabs can be unloaded after 30 minutes. They reload when opened; unsaved form input may be lost."
+                        : "Inactive tabs pause after a short time. Tabs playing audio stay awake."
+                    : "All tabs stay active in the background. Turn this on to use less memory.");
                 break;
         }
         }
@@ -2518,7 +4354,26 @@ public sealed class MainForm : SnapWindowForm
     {
         if (_isPrivate || !TryGetPageDetails(tab, out var url, out var title, out var iconUrl)) return;
         _library.ToggleBookmark(url, title, iconUrl);
+        CaptureBookmarkIcon(tab!);
         UpdateBookmarkButton();
+    }
+
+    private void CaptureBookmarkIcon(BrowserTab tab)
+    {
+        if (_isPrivate || tab.IsClosing || tab.FaviconImage is null ||
+            !TryGetPageDetails(tab, out var url, out _, out var iconUrl)) return;
+        // Do not save a previous page's favicon while the next one is loading.
+        if (!string.Equals(tab.FaviconImageUri, iconUrl, StringComparison.Ordinal)) return;
+        var entry = _library.Bookmarks.FirstOrDefault(item => item.Url == url);
+        if (entry is null) return;
+        try
+        {
+            var png = BookmarkIcons.Encode(tab.FaviconImage);
+            if (!_library.UpdateIcon(entry.Id, url, iconUrl, png)) return;
+            foreach (var row in _actionFlyoutItems.Controls.OfType<HistoryFlyoutItem>().Where(row => Equals(row.Tag, entry.Id)))
+                row.SiteIcon = BookmarkIcons.Decode(png);
+        }
+        catch { /* A transient icon failure must not prevent saving a bookmark. */ }
     }
 
     private bool TryGetActivePageDetails(out string url, out string title, out string? iconUrl) =>
@@ -2558,6 +4413,8 @@ public sealed class MainForm : SnapWindowForm
             AccessibleName = entry.Title,
             AccessibleDescription = detail
         };
+        item.Tag = entry.Id;
+        item.SiteIcon = BookmarkIcons.Decode(entry.IconPng);
         item.TrailingSpace = 30;
         item.Click += (_, _) => NavigateToLibraryEntry(entry);
         item.Disposed += (_, _) => item.Font.Dispose();
@@ -2592,6 +4449,31 @@ public sealed class MainForm : SnapWindowForm
         item.Controls.Add(manage);
         item.Disposed += (_, _) => menu.Dispose();
         _tooltips.SetToolTip(item, $"{entry.Url}\nRight-click to manage");
+        if (item.SiteIcon is null) _ = LoadBookmarkIconAsync(item, entry);
+    }
+
+    private async Task LoadBookmarkIconAsync(HistoryFlyoutItem item, LibraryEntry entry)
+    {
+        var pageUrl = entry.Url;
+        var previousPng = entry.IconPng;
+        var iconUrl = string.IsNullOrWhiteSpace(entry.IconUrl) ? new Uri(new Uri(pageUrl), "/favicon.ico").AbsoluteUri : entry.IconUrl;
+        if (!_bookmarkIconLoads.TryGetValue(iconUrl, out var request))
+        {
+            // Failed requests are cached too, avoiding repeated retries while searching.
+            if (_bookmarkIconLoads.Count >= 64)
+            {
+                var completed = _bookmarkIconLoads.FirstOrDefault(pair => pair.Value.IsCompleted).Key;
+                if (completed is null) return;
+                _bookmarkIconLoads.Remove(completed);
+            }
+            request = BookmarkIcons.DownloadAsync(iconUrl, _bookmarkIconCancellation.Token);
+            _bookmarkIconLoads[iconUrl] = request;
+        }
+        var png = await request;
+        if (IsDisposed || Disposing || _bookmarkIconCancellation.IsCancellationRequested || png is null || entry.Url != pageUrl) return;
+        // A WebView icon arriving during the download is preferable (supports SVG and authenticated icons).
+        if (entry.IconPng == previousPng) _library.UpdateIcon(entry.Id, pageUrl, iconUrl, png);
+        if (!item.IsDisposed) item.SiteIcon = BookmarkIcons.Decode(entry.IconPng ?? png);
     }
 
     private void UpdateBookmarkButton()
@@ -2636,8 +4518,10 @@ public sealed class MainForm : SnapWindowForm
             var title = AddBookmarkField("Bookmark name", editing.Title);
             AddActionFlyoutSectionLabel("Address", "");
             var url = AddBookmarkField("https://example.com", editing.Url);
-            AddActionFlyoutInfo("Use a web address. Duplicate bookmarks aren’t added.");
+            AddActionFlyoutInfo(string.Empty);
             var hint = (Label)_actionFlyoutItems.Controls[^1];
+            hint.Height = 0;
+            hint.Margin = Padding.Empty;
             AddCompactActions(
                 ("Save", () =>
                 {
@@ -2645,6 +4529,8 @@ public sealed class MainForm : SnapWindowForm
                     {
                         hint.Text = "Enter a valid HTTP(S) address that isn’t already saved.";
                         hint.ForeColor = _theme.DangerText;
+                        hint.Height = TextRenderer.MeasureText(hint.Text, hint.Font, new Size(hint.Width, 0), TextFormatFlags.WordBreak).Height + Ui(8);
+                        LayoutActionFlyout();
                         url.Focus();
                         return;
                     }
@@ -2657,16 +4543,19 @@ public sealed class MainForm : SnapWindowForm
         }
 
         if (TryGetActivePageDetails(out _, out _, out _))
-            AddCompactActions((IsCurrentPageBookmarked() ? "Remove current bookmark" : "Bookmark this page", () =>
+        {
+            var bookmarked = IsCurrentPageBookmarked();
+            var saveButton = AddActionFlyoutButton(bookmarked ? "Bookmarked" : "Bookmark this page", bookmarked ? "Remove bookmark" : "Save this page (Ctrl+D)", () =>
             {
                 ToggleCurrentBookmark();
                 PopulateActionFlyout();
-            }, IsCurrentPageBookmarked(), false));
-        if (_library.Bookmarks.Count == 0)
-        {
-            AddActionFlyoutInfo("Save pages with Ctrl+D. Your bookmarks will appear here.");
-            return;
+            }, selected: bookmarked, prominent: !bookmarked);
+            saveButton.Height = Ui(46);
+            saveButton.Margin = UiPadding(4, 0, 4, 10);
+            saveButton.CenterText = true;
+            saveButton.AccessibleName = bookmarked ? "Remove bookmark" : "Bookmark this page";
         }
+        if (_library.Bookmarks.Count == 0) return;
 
         var search = AddBookmarkField("Search bookmarks", _bookmarkQuery);
         var firstResultIndex = _actionFlyoutItems.Controls.Count;
@@ -2683,7 +4572,6 @@ public sealed class MainForm : SnapWindowForm
                 var results = _library.Bookmarks.Where(entry =>
                     entry.Title.Contains(_bookmarkQuery, StringComparison.OrdinalIgnoreCase) ||
                     entry.Url.Contains(_bookmarkQuery, StringComparison.OrdinalIgnoreCase)).ToArray();
-                AddActionFlyoutSectionLabel("Saved pages", $"{results.Length} saved");
                 foreach (var entry in results.Take(_bookmarkLimit)) AddLibraryFlyoutItem(entry);
                 if (results.Length == 0) AddActionFlyoutInfo("No matching bookmarks");
                 if (results.Length > _bookmarkLimit)
@@ -2735,14 +4623,19 @@ public sealed class MainForm : SnapWindowForm
     private async Task SetTrackingPreventionAsync(string level)
     {
         if (_isPrivate || level is not ("Basic" or "Balanced" or "Strict")) return;
+        _settings.TrackingPrevention = level;
+        SaveSettings();
         var profile = _tabs.Select(tab => tab.View.CoreWebView2?.Profile).FirstOrDefault(item => item is not null);
-        if (profile is null) return;
+        if (profile is null)
+        {
+            if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Privacy)
+                PopulateActionFlyout();
+            return;
+        }
 
         try
         {
             profile.PreferredTrackingPreventionLevel = Enum.Parse<CoreWebView2TrackingPreventionLevel>(level);
-            _settings.TrackingPrevention = level;
-            SaveSettings();
             if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Privacy)
                 PopulateActionFlyout();
         }
@@ -2840,39 +4733,62 @@ public sealed class MainForm : SnapWindowForm
 
     private void SetSearchProvider(string provider)
     {
-        if (_isPrivate || provider is not ("Google" or "DuckDuckGo" or "Bing" or "Brave")) return;
+        if (!SearchProvider.Names.Contains(provider)) return;
         _settings.SearchEngine = provider;
         SaveSettings();
+        foreach (var tab in ActiveWorkspaceTabs)
+        {
+            tab.SuggestionCancellation?.Cancel();
+            if (tab.IsHome) _ = PopulateHomeAsync(tab);
+        }
         if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Search)
             PopulateActionFlyout();
     }
 
-    private void ChooseCustomSearchProvider()
+    private void SetMemorySaverEnabled(bool enabled)
     {
-        if (_isPrivate) return;
-        var template = Microsoft.VisualBasic.Interaction.InputBox(
-            "Enter a search URL containing {query}.\nExample: https://example.com/search?q={query}",
-            "Custom search engine",
-            _settings.CustomSearchUrl ?? "https://www.google.com/search?q={query}");
-        if (string.IsNullOrWhiteSpace(template)) return;
-        if (!IsSearchTemplate(template))
+        if (_isPrivate || _settings.LowMemoryMode == enabled) return;
+
+        _settings.LowMemoryMode = enabled;
+        var now = DateTime.UtcNow;
+        foreach (var tab in ActiveWorkspaceTabs)
         {
-            MessageBox.Show(this, "Use a valid http(s) URL containing {query}.", "Custom search engine", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            if (tab.IsClosing || tab.View.IsDisposed) continue;
+
+            if (!enabled)
+            {
+                try
+                {
+                    if (tab.View.CoreWebView2?.IsSuspended == true)
+                        tab.View.CoreWebView2.Resume();
+                }
+                catch
+                {
+                    // Resuming is best effort while a tab is closing.
+                }
+                tab.IsSuspended = false;
+                tab.IsSuspending = false;
+                tab.InactiveSinceUtc = null;
+            }
+            else if (!ReferenceEquals(tab, _activeTab) && tab.View.CoreWebView2 is not null)
+            {
+                tab.InactiveSinceUtc = now;
+            }
         }
 
-        _settings.SearchEngine = "Custom";
-        _settings.CustomSearchUrl = template.Trim();
         SaveSettings();
-        if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Search)
+        if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Performance)
             PopulateActionFlyout();
     }
 
-    private static bool IsSearchTemplate(string value)
+    private void SetTabDiscardingEnabled(bool enabled)
     {
-        return value.Contains("{query}", StringComparison.Ordinal) &&
-            Uri.TryCreate(value.Replace("{query}", "test", StringComparison.Ordinal), UriKind.Absolute, out var uri) &&
-            uri.Scheme is "http" or "https";
+        if (_isPrivate || _settings.DiscardInactiveTabs == enabled) return;
+
+        _settings.DiscardInactiveTabs = enabled;
+        SaveSettings();
+        if (_actionFlyout.Visible && _actionFlyoutMode == ActionFlyoutMode.Performance)
+            PopulateActionFlyout();
     }
 
     private static string ColorToCss(Color color)
@@ -3049,6 +4965,8 @@ public sealed class MainForm : SnapWindowForm
             _navigation.BackColor = _chrome;
             _utilityActions.BackColor = _chrome;
             _contentHost.BackColor = theme.ContentBackground;
+            _splitDivider.BackColor = theme.Chrome;
+            _splitDivider.Invalidate();
             _addressSurface.BackColor = _chrome;
             _addressBar.BackColor = theme.Surface;
             _addressBar.ForeColor = _text;
@@ -3063,6 +4981,9 @@ public sealed class MainForm : SnapWindowForm
             _newTabButton.FlatAppearance.BorderColor = theme.Border;
             _newTabButton.FlatAppearance.MouseOverBackColor = theme.SurfaceHover;
             _newTabButton.FlatAppearance.MouseDownBackColor = theme.SurfacePressed;
+            _workspaceButton.BackColor = _chrome;
+            _workspaceButton.ForeColor = _text;
+            UpdateWorkspaceSwitcher();
 
             ConfigureToolbarButton(_backButton, string.Empty, "Back");
             ConfigureToolbarButton(_forwardButton, string.Empty, "Forward");
@@ -3108,6 +5029,7 @@ public sealed class MainForm : SnapWindowForm
             ConfigureToolbarMenu(_downloadsMenu);
             ConfigureToolbarMenu(_historyMenu);
             ConfigureToolbarMenu(_guiScaleMenu);
+            ConfigureToolbarMenu(_workspaceMenu);
             _tooltips.SetToolTip(_themeButton, $"Theme ({_theme.Name})");
             UpdateDownloadsButton();
             UpdateNavigationButtons();
@@ -3151,7 +5073,11 @@ public sealed class MainForm : SnapWindowForm
 
     private void ApplyGuiScale()
     {
+        if (_applyingGuiScale || IsDisposed) return;
+        _applyingGuiScale = true;
+        var chromeContainers = new Control?[] { _titleBar, _titleArea, _windowButtons, _toolbar, _navigation, _utilityActions, _tabsFlow, _workspaceButton };
         SuspendLayout();
+        foreach (var container in chromeContainers) container?.SuspendLayout();
         try
         {
             Padding = UiPadding(7);
@@ -3159,6 +5085,19 @@ public sealed class MainForm : SnapWindowForm
             MinimumSize = GetScaledMinimumWindowSize();
 
             if (_titleBar is not null) _titleBar.Height = Ui(54);
+            if (_windowButtons is not null)
+            {
+                _windowButtons.Width = Ui(138);
+                _windowButtons.Padding = UiPadding(0, 2, 0, 0);
+                foreach (Button button in _windowButtons.Controls)
+                {
+                    button.Size = new Size(Ui(46), Ui(36));
+                    if (button is CloseGlyphButton close) close.UiScale = GuiScale;
+                    var previousFont = button.Font;
+                    button.Font = new Font("Segoe MDL2 Assets", 10F * GuiScale);
+                    previousFont.Dispose();
+                }
+            }
             if (_toolbar is not null)
             {
                 _toolbar.Height = Ui(56);
@@ -3199,6 +5138,8 @@ public sealed class MainForm : SnapWindowForm
             _newTabButton.Font = CreateUiFont(13F);
             _newTabButton.Size = new Size(Ui(36), Ui(32));
             _newTabButton.UiScale = GuiScale;
+            _workspaceButton.Font = CreateUiFont(12F);
+            _workspaceButton.UiScale = GuiScale;
             foreach (var tab in _tabs)
             {
                 tab.Button.Font = CreateUiFont(13F);
@@ -3209,6 +5150,7 @@ public sealed class MainForm : SnapWindowForm
             ConfigureToolbarMenu(_downloadsMenu);
             ConfigureToolbarMenu(_historyMenu);
             ConfigureToolbarMenu(_guiScaleMenu);
+            ConfigureToolbarMenu(_workspaceMenu);
             UpdateDownloadsButton();
             _tooltips.SetToolTip(_guiScaleButton, $"GUI scale ({_guiScale:P0})");
             _actionFlyout.Padding = Padding.Empty;
@@ -3230,8 +5172,19 @@ public sealed class MainForm : SnapWindowForm
         }
         finally
         {
+            foreach (var container in chromeContainers.Reverse()) container?.ResumeLayout(false);
             ResumeLayout(true);
             PerformLayout();
+            _titleBar?.PerformLayout();
+            _toolbar?.PerformLayout();
+            _navigation.PerformLayout();
+            _utilityActions.PerformLayout();
+            if (_titleArea is not null) LayoutTabStrip(_titleArea);
+            if (_activeTab is { IsClosing: false }) EnsureTabVisible(_activeTab);
+            LayoutContentViews();
+            LayoutActionFlyout();
+            Invalidate(true);
+            _applyingGuiScale = false;
         }
     }
 
@@ -3286,6 +5239,185 @@ public sealed class MainForm : SnapWindowForm
         if (ReferenceEquals(tab, _activeTab)) UpdateNavigationButtons();
     }
 
+    private bool HasSplitView =>
+        _splitLeftTab is { IsClosing: false } left &&
+        _splitRightTab is { IsClosing: false } right &&
+        !ReferenceEquals(left, right) &&
+        _tabs.Contains(left) && _tabs.Contains(right) &&
+        left.WorkspaceId == right.WorkspaceId &&
+        (_isPrivate || left.WorkspaceId == ActiveWorkspaceId);
+
+    private bool IsSplitParticipant(BrowserTab tab) =>
+        HasSplitView && (ReferenceEquals(tab, _splitLeftTab) || ReferenceEquals(tab, _splitRightTab));
+
+    private async Task ToggleSplitWithNextTabAsync()
+    {
+        if (HasSplitView)
+        {
+            CloseSplitView();
+            return;
+        }
+
+        var candidate = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, _activeTab));
+        if (candidate is not null) await OpenSplitViewAsync(candidate);
+    }
+
+    private async Task ToggleSplitViewAsync(BrowserTab requested)
+    {
+        if (IsSplitParticipant(requested))
+        {
+            CloseSplitView();
+            return;
+        }
+
+        await OpenSplitViewAsync(requested);
+    }
+
+    private async Task OpenSplitViewAsync(BrowserTab requested)
+    {
+        if (requested.IsClosing || !_tabs.Contains(requested) || requested.WorkspaceId != ActiveWorkspaceId) return;
+
+        var primary = _activeTab;
+        if (primary is null || primary.IsClosing || primary.WorkspaceId != requested.WorkspaceId)
+            primary = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, requested));
+        else if (ReferenceEquals(primary, requested))
+            primary = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, requested));
+        if (primary is null || primary.IsClosing || ReferenceEquals(primary, requested)) return;
+
+        CloseSplitView(revealActive: false);
+
+        // Activate each tab once before presenting both. That preserves lazy
+        // restoration and makes an unloaded tab safe to show beside a page.
+        await ActivateTabAsync(requested);
+        if (requested.IsClosing || primary.IsClosing || !_tabs.Contains(primary)) return;
+        await ActivateTabAsync(primary);
+        if (requested.IsClosing || primary.IsClosing || !_tabs.Contains(requested) || !_tabs.Contains(primary)) return;
+
+        _splitLeftTab = primary;
+        _splitRightTab = requested;
+        _activeTab = primary;
+        FocusSplitTab(primary);
+        await RevealSplitTabsAsync();
+    }
+
+    private void CloseSplitView(bool revealActive = true)
+    {
+        var hadSplitView = HasSplitView;
+        _splitLeftTab = null;
+        _splitRightTab = null;
+        _draggingSplitDivider = false;
+        _splitDivider.Capture = false;
+        _splitDivider.Visible = false;
+        if (!hadSplitView) return;
+
+        LayoutContentViews();
+        if (revealActive && _activeTab is { IsClosing: false } active)
+            _ = RevealTabAsync(active);
+    }
+
+    private void FocusSplitTab(BrowserTab tab)
+    {
+        if (!IsSplitParticipant(tab) || tab.IsClosing) return;
+        _activeTab = tab;
+        var now = DateTime.UtcNow;
+        foreach (var item in _tabs)
+        {
+            var active = ReferenceEquals(item, tab);
+            item.InactiveSinceUtc = active || IsSplitParticipant(item)
+                ? null
+                : item.InactiveSinceUtc ?? now;
+            UpdateTabButton(item);
+        }
+        UpdateAddressBar();
+        UpdateNavigationButtons();
+    }
+
+    private async Task RevealSplitTabsAsync()
+    {
+        if (!HasSplitView || _splitLeftTab is not { } left || _splitRightTab is not { } right) return;
+        var focused = IsSplitParticipant(_activeTab ?? left) ? _activeTab! : left;
+
+        _contentHost.SuspendLayout();
+        try
+        {
+            LayoutContentViews();
+            SetWebViewPresentation(left, true);
+            SetWebViewPresentation(right, true);
+            foreach (var tab in _tabs)
+            {
+                if (!ReferenceEquals(tab, left) && !ReferenceEquals(tab, right))
+                    SetWebViewPresentation(tab, false);
+            }
+            _splitDivider.BringToFront();
+        }
+        finally
+        {
+            _contentHost.ResumeLayout(true);
+        }
+
+        FocusSplitTab(focused);
+        await Task.CompletedTask;
+    }
+
+    private void LayoutContentViews()
+    {
+        if (!HasSplitView || _splitLeftTab is not { } left || _splitRightTab is not { } right)
+        {
+            _splitDivider.Visible = false;
+            foreach (var tab in _tabs.Where(tab => !tab.View.IsDisposed))
+            {
+                tab.View.Dock = DockStyle.Fill;
+                tab.View.Bounds = _contentHost.ClientRectangle;
+                try { GetWebViewController(tab.View)?.NotifyParentWindowPositionChanged(); }
+                catch { /* A WebView controller can be shutting down during resize. */ }
+            }
+            return;
+        }
+
+        var dividerWidth = Math.Max(Ui(7), 5);
+        var availableWidth = Math.Max(1, _contentHost.ClientSize.Width - dividerWidth);
+        var minimumPaneWidth = Math.Min(Math.Max(Ui(110), availableWidth / 5), Ui(260));
+        var leftWidth = Math.Clamp((int)Math.Round(availableWidth * _splitRatio), minimumPaneWidth, Math.Max(minimumPaneWidth, availableWidth - minimumPaneWidth));
+        var rightWidth = Math.Max(1, availableWidth - leftWidth);
+        _splitRatio = (float)leftWidth / availableWidth;
+
+        left.View.Dock = DockStyle.None;
+        right.View.Dock = DockStyle.None;
+        left.View.Bounds = new Rectangle(0, 0, leftWidth, _contentHost.ClientSize.Height);
+        _splitDivider.SetBounds(leftWidth, 0, dividerWidth, _contentHost.ClientSize.Height);
+        right.View.Bounds = new Rectangle(leftWidth + dividerWidth, 0, rightWidth, _contentHost.ClientSize.Height);
+        _splitDivider.Visible = true;
+
+        foreach (var tab in new[] { left, right })
+        {
+            try { GetWebViewController(tab.View)?.NotifyParentWindowPositionChanged(); }
+            catch { /* A WebView controller can be shutting down during resize. */ }
+        }
+    }
+
+    private void BeginSplitDividerDrag(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || !HasSplitView) return;
+        _draggingSplitDivider = true;
+        _splitDivider.Capture = true;
+    }
+
+    private void MoveSplitDivider(object? sender, MouseEventArgs e)
+    {
+        if (!_draggingSplitDivider || !HasSplitView) return;
+        var pointer = _contentHost.PointToClient(_splitDivider.PointToScreen(e.Location));
+        var availableWidth = Math.Max(1, _contentHost.ClientSize.Width - _splitDivider.Width);
+        _splitRatio = Math.Clamp((float)pointer.X / availableWidth, 0.2f, 0.8f);
+        LayoutContentViews();
+    }
+
+    private void EndSplitDividerDrag(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        _draggingSplitDivider = false;
+        _splitDivider.Capture = false;
+    }
+
     private async void CloseTab(BrowserTab tab)
     {
         var index = _tabs.IndexOf(tab);
@@ -3298,8 +5430,10 @@ public sealed class MainForm : SnapWindowForm
         index = _tabs.IndexOf(tab);
 
         var wasActive = ReferenceEquals(tab, _activeTab);
+        if (IsSplitParticipant(tab)) CloseSplitView(revealActive: !wasActive);
         var replacement = wasActive
-            ? _tabs.Skip(index + 1).FirstOrDefault(item => !item.IsClosing) ?? _tabs.Take(index).LastOrDefault(item => !item.IsClosing)
+            ? _tabs.Skip(index + 1).FirstOrDefault(item => !item.IsClosing && item.WorkspaceId == tab.WorkspaceId) ??
+              _tabs.Take(index).LastOrDefault(item => !item.IsClosing && item.WorkspaceId == tab.WorkspaceId)
             : null;
 
         // Keep the closing WebView on screen until its replacement is fully
@@ -3309,6 +5443,8 @@ public sealed class MainForm : SnapWindowForm
         if (IsDisposed || tab.View.IsDisposed) return;
 
         _tabs.Remove(tab);
+        _selectedTabs.Remove(tab);
+        if (ReferenceEquals(_selectionAnchor, tab)) _selectionAnchor = null;
         _contentHost.Controls.Remove(tab.View);
         _tabsFlow.Controls.Remove(tab.Button);
         LayoutTabs();
@@ -3321,13 +5457,14 @@ public sealed class MainForm : SnapWindowForm
         tab.Button.ContextMenuStrip?.Dispose();
         tab.Button.Dispose();
 
-        if (_tabs.Count == 0)
+        if (_tabs.Count == 0 || (! _isPrivate && !ActiveWorkspaceTabs.Any()))
         {
             _activeTab = null;
-            await OpenNewTabAsync();
+            await OpenWorkspaceStartupTabAsync();
             return;
         }
-
+        CapturePreviousSession();
+        SaveSettings();
     }
 
     private void ActivateTab(BrowserTab tab)
@@ -3338,6 +5475,19 @@ public sealed class MainForm : SnapWindowForm
     private async Task ActivateTabAsync(BrowserTab tab)
     {
         if (!_tabs.Contains(tab) || tab.IsClosing) return;
+        if (!_isPrivate && tab.WorkspaceId != ActiveWorkspaceId)
+        {
+            await SwitchWorkspaceAsync(tab.WorkspaceId);
+            return;
+        }
+        if (IsSplitParticipant(tab))
+        {
+            FocusSplitTab(tab);
+            return;
+        }
+        if (HasSplitView) CloseSplitView(revealActive: false);
+        if (GetTabGroup(tab) is { IsCollapsed: true } group && !ReferenceEquals(tab, GetCollapsedGroupRepresentative(group.Id)))
+            SetTabGroupCollapsed(group.Id, false);
         _activeTab = tab;
         var now = DateTime.UtcNow;
 
@@ -3384,6 +5534,11 @@ public sealed class MainForm : SnapWindowForm
     {
         if (tab.View.IsDisposed || !_tabs.Contains(tab) || !ReferenceEquals(tab, _activeTab) ||
             !tab.InitialNavigationReady) return;
+        if (IsSplitParticipant(tab))
+        {
+            await RevealSplitTabsAsync();
+            return;
+        }
 
         var previous = _tabs.FirstOrDefault(item =>
             !ReferenceEquals(item, tab) && item.View.Visible && !item.View.IsDisposed);
@@ -3498,68 +5653,176 @@ public sealed class MainForm : SnapWindowForm
 
     private async Task SuspendInactiveTabsAsync()
     {
-        if (!_settings.LowMemoryMode || _tabs.Count < 2) return;
+        if (_tabs.Count < 2 || _suspensionSweepRunning) return;
+
+        _suspensionSweepRunning = true;
+        try
+        {
+            var now = DateTime.UtcNow;
+            foreach (var tab in _tabs.ToArray())
+            {
+                if (!UsesMemorySaver(tab) || ReferenceEquals(tab, _activeTab) || IsSplitParticipant(tab) ||
+                    tab.IsClosing || tab.IsPlayingAudio ||
+                    tab.IsSuspended ||
+                    tab.IsSuspending ||
+                    tab.InactiveSinceUtc is null ||
+                    now - tab.InactiveSinceUtc.Value < InactiveTabDelay ||
+                    tab.View.IsDisposed ||
+                    tab.View.CoreWebView2 is null)
+                {
+                    continue;
+                }
+
+                tab.IsSuspending = true;
+                try
+                {
+                    var core = tab.View.CoreWebView2;
+                    if (ReferenceEquals(tab, _activeTab)) continue;
+
+                    var suspended = await core.TrySuspendAsync();
+                    tab.IsSuspended = suspended && core.IsSuspended;
+                    if (ReferenceEquals(tab, _activeTab) && tab.IsSuspended)
+                    {
+                        core.Resume();
+                        tab.IsSuspended = false;
+                    }
+                    UpdateTabButton(tab);
+                }
+                catch
+                {
+                    // Suspension is an optimization. A failed attempt must not affect browsing.
+                }
+                finally
+                {
+                    tab.IsSuspending = false;
+                }
+            }
+
+            await DiscardInactiveTabsAsync();
+        }
+        finally
+        {
+            _suspensionSweepRunning = false;
+        }
+    }
+
+    private Task DiscardInactiveTabsAsync()
+    {
+        if (_tabs.Count < 2)
+            return Task.CompletedTask;
 
         var now = DateTime.UtcNow;
         foreach (var tab in _tabs.ToArray())
         {
-            if (ReferenceEquals(tab, _activeTab) ||
-                tab.IsClosing || tab.IsPlayingAudio ||
-                tab.IsSuspended ||
-                tab.IsSuspending ||
-                tab.InactiveSinceUtc is null ||
-                now - tab.InactiveSinceUtc.Value < InactiveTabDelay ||
-                tab.View.IsDisposed ||
-                tab.View.CoreWebView2 is null)
+            if (!UsesMemorySaver(tab) || !UsesTabDiscarding(tab) || ReferenceEquals(tab, _activeTab) || IsSplitParticipant(tab) || tab.IsClosing || tab.IsPinned ||
+                tab.IsPlayingAudio || tab.IsSuspending || tab.InactiveSinceUtc is null ||
+                now - tab.InactiveSinceUtc.Value < DiscardInactiveTabDelay ||
+                tab.View.IsDisposed || tab.View.CoreWebView2 is null ||
+                !TryGetRestorableTabUrl(tab, out var url))
             {
                 continue;
             }
 
-            tab.IsSuspending = true;
-            try
-            {
-                var core = tab.View.CoreWebView2;
-                if (ReferenceEquals(tab, _activeTab)) continue;
+            // Replacing the controller is what releases renderer memory. This is
+            // intentionally separate from suspension and only runs when the user
+            // opted in to reloading long-idle tabs.
+            var previousView = tab.View;
+            tab.SuggestionCancellation?.Cancel();
+            tab.SuggestionCancellation?.Dispose();
+            tab.SuggestionCancellation = null;
+            tab.FaviconRequestVersion++;
+            tab.InitialNavigationTarget = url;
+            tab.InitialNavigationStarted = false;
+            tab.InitialNavigationReady = false;
+            tab.InitializationTask = null;
+            tab.DeferredNavigation = true;
+            tab.IsSuspended = false;
+            tab.IsSuspending = false;
+            tab.IsDiscarded = true;
+            tab.FallbackHostFilterRegistered = false;
 
-                var suspended = await core.TrySuspendAsync();
-                tab.IsSuspended = suspended && core.IsSuspended;
-                if (ReferenceEquals(tab, _activeTab) && tab.IsSuspended)
-                {
-                    core.Resume();
-                    tab.IsSuspended = false;
-                }
-                UpdateTabButton(tab);
-            }
-            catch
+            BatchChromeUpdate(() =>
             {
-                // Suspension is an optimization. A failed attempt must not affect browsing.
-            }
-            finally
-            {
-                tab.IsSuspending = false;
-            }
+                _contentHost.Controls.Remove(previousView);
+                tab.ReplaceView(CreateBrowserView());
+                _contentHost.Controls.Add(tab.View);
+                tab.View.Bounds = _contentHost.ClientRectangle;
+            });
+            previousView.Dispose();
+            UpdateTabButton(tab);
         }
+
+        return Task.CompletedTask;
+    }
+
+    private bool UsesMemorySaver(BrowserTab tab)
+    {
+        if (_isPrivate || tab.WorkspaceId == ActiveWorkspaceId) return _settings.LowMemoryMode;
+        return GetWorkspace(tab.WorkspaceId)?.LowMemoryMode ?? _settings.LowMemoryMode;
+    }
+
+    private bool UsesTabDiscarding(BrowserTab tab)
+    {
+        if (_isPrivate || tab.WorkspaceId == ActiveWorkspaceId) return _settings.DiscardInactiveTabs;
+        return GetWorkspace(tab.WorkspaceId)?.DiscardInactiveTabs ?? _settings.DiscardInactiveTabs;
     }
 
     private void UpdateTabButton(BrowserTab tab)
     {
         var active = ReferenceEquals(tab, _activeTab);
-        tab.Button.Text = tab.Title;
-        tab.Button.Favicon = tab.IsHome ? _homeTabIcon : tab.FaviconImage;
+        var group = GetTabGroup(tab);
+        var collapsedRepresentative = group is { IsCollapsed: true }
+            ? GetCollapsedGroupRepresentative(group.Id)
+            : null;
+        var isCollapsedRepresentative = ReferenceEquals(tab, collapsedRepresentative);
+        tab.Button.Text = isCollapsedRepresentative
+            ? $"› {group!.Icon} {group.Name} ({GetGroupTabCount(group.Id)})"
+            : tab.Title;
+        tab.Button.Favicon = isCollapsedRepresentative ? null : tab.IsHome ? _homeTabIcon : tab.FaviconImage;
         tab.Button.Muted = tab.IsMuted;
         tab.Button.PlayingAudio = tab.IsPlayingAudio;
         tab.Button.Pinned = tab.IsPinned;
+        tab.Button.GroupColor = group is null
+            ? Color.Empty
+            : TugleSettings.FromHex(group.Color, Color.Empty);
         tab.Button.Active = active;
+        tab.Button.Selected = _selectedTabs.Contains(tab);
         tab.Button.ForeColor = active ? _text : _muted;
-        tab.Button.AccessibleName = tab.Title + (tab.IsPinned ? " pinned" : string.Empty) + (active ? " tab active" : " tab");
+        tab.Button.AccessibleName = tab.Title +
+            (group is null ? string.Empty : $", {group.Name} tab group") +
+            (isCollapsedRepresentative ? $", collapsed group with {GetGroupTabCount(group!.Id)} tabs" : string.Empty) +
+            (tab.IsPinned ? " pinned" : string.Empty) +
+            (active ? " tab active" : " tab");
         tab.Button.AccessibleDescription = tab.IsMuted
             ? "This tab is muted. Use the speaker button before the X to unmute it."
+            : tab.IsDiscarded
+            ? "This inactive tab was unloaded to save memory. Select it to reload."
             : tab.IsSuspended
             ? "This inactive tab is suspended to save memory. Select it to resume."
             : tab.IsPlayingAudio ? "Playing audio. Use the speaker button to mute this tab."
             : "Click to switch to this tab. Use the X to close it.";
-        _tooltips.SetToolTip(tab.Button, tab.Title + (tab.IsMuted ? " · Muted" : tab.IsPlayingAudio ? " · Playing audio" : ""));
+        _tooltips.SetToolTip(tab.Button, tab.Title +
+            (group is null ? string.Empty : $" · {group.Icon} {group.Name}") +
+            (isCollapsedRepresentative ? $" · {GetGroupTabCount(group!.Id)} tabs collapsed" : string.Empty) +
+            (tab.IsMuted ? " · Muted" : tab.IsPlayingAudio ? " · Playing audio" : ""));
         tab.Button.Invalidate();
+    }
+
+    private BrowserTab? GetCollapsedGroupRepresentative(Guid groupId) =>
+        _activeTab is { IsClosing: false } active && active.GroupId == groupId
+            ? active
+            : _tabs.FirstOrDefault(tab => !tab.IsClosing && tab.GroupId == groupId);
+
+    private int GetGroupTabCount(Guid groupId) => _tabs.Count(tab => !tab.IsClosing && tab.GroupId == groupId);
+
+    private IEnumerable<BrowserTab> GetDisplayedTabs()
+    {
+        foreach (var tab in ActiveWorkspaceTabs)
+        {
+            var group = GetTabGroup(tab);
+            if (group is not { IsCollapsed: true } || ReferenceEquals(tab, GetCollapsedGroupRepresentative(group.Id)))
+                yield return tab;
+        }
     }
 
     private void LayoutTabs()
@@ -3574,12 +5837,15 @@ public sealed class MainForm : SnapWindowForm
         // icon. Extra tabs deliberately overflow so the wheel can reveal them.
         var tabWidth = Math.Max(minimumWidth, preferredWidth);
 
-        _tabContentWidth = gap + _tabs.Count * (tabWidth + gap);
+        var displayedTabs = GetDisplayedTabs().ToArray();
+        _tabContentWidth = gap + displayedTabs.Length * (tabWidth + gap);
         var maximumScroll = Math.Max(0, _tabContentWidth - _tabViewportWidth);
         _tabScrollOffset = Math.Clamp(_tabScrollOffset, 0, maximumScroll);
 
         var x = gap - _tabScrollOffset;
         foreach (var tab in _tabs)
+            tab.Button.Visible = false;
+        foreach (var tab in displayedTabs)
         {
             tab.Button.SetBounds(x, gap, tabWidth, height);
             tab.Button.Visible = x < _tabViewportWidth && x + tabWidth > 0;
@@ -3595,9 +5861,16 @@ public sealed class MainForm : SnapWindowForm
         var scale = GuiScale * DeviceDpi / 96f;
         var gap = Math.Max(4, (int)(6 * scale));
         var plusWidth = Math.Max(1, (int)(40 * scale));
-        var viewportWidth = Math.Max(1, titleArea.ClientSize.Width - plusWidth - gap * 2);
+        var preferredWorkspaceWidth = Math.Max(Ui(104), (int)(148 * scale));
+        var workspaceWidth = _isPrivate ? 0 : Math.Min(preferredWorkspaceWidth,
+            Math.Max(Ui(76), titleArea.ClientSize.Width / 3));
+        var tabLeft = _isPrivate ? 0 : workspaceWidth + gap;
+        var viewportWidth = Math.Max(1, titleArea.ClientSize.Width - tabLeft - plusWidth - gap * 2);
 
-        _tabsFlow.SetBounds(0, 0, viewportWidth, titleArea.ClientSize.Height);
+        _workspaceButton.Visible = !_isPrivate;
+        if (!_isPrivate)
+            _workspaceButton.SetBounds(gap, gap, workspaceWidth, Math.Max(1, titleArea.ClientSize.Height - gap * 2));
+        _tabsFlow.SetBounds(tabLeft, 0, viewportWidth, titleArea.ClientSize.Height);
         LayoutTabs();
     }
 
@@ -3613,8 +5886,8 @@ public sealed class MainForm : SnapWindowForm
         // Put + immediately after the last tab when the strip fits. Once tabs
         // overflow, keep + at the right edge so it remains easy to reach.
         var plusX = _tabContentWidth <= viewportWidth
-            ? Math.Max(gap, _tabContentWidth)
-            : viewportWidth + gap;
+            ? _tabsFlow.Left + Math.Max(gap, _tabContentWidth)
+            : _tabsFlow.Left + viewportWidth + gap;
         _newTabButton.SetBounds(
             plusX,
             gap,
@@ -3639,7 +5912,7 @@ public sealed class MainForm : SnapWindowForm
 
     private void EnsureTabVisible(BrowserTab tab)
     {
-        if (!_tabs.Contains(tab) || _tabContentWidth <= _tabViewportWidth) return;
+        if (!_tabs.Contains(tab) || !GetDisplayedTabs().Contains(tab) || _tabContentWidth <= _tabViewportWidth) return;
 
         var left = tab.Button.Left;
         var right = tab.Button.Right;
@@ -3672,9 +5945,12 @@ public sealed class MainForm : SnapWindowForm
     private void BeginTabDrag(BrowserTab tab)
     {
         if (tab.IsClosing) return;
+        if (!_selectedTabs.Contains(tab)) SelectTabFromPointer(tab, Keys.None);
         _draggedTab = tab;
+        _draggedTabs.Clear();
+        _draggedTabs.AddRange(GetTabsForOperation(tab).OrderBy(item => _tabs.IndexOf(item)));
         _tabsFlow.Cursor = Cursors.SizeAll;
-        tab.Button.IsDragging = true;
+        foreach (var dragged in _draggedTabs) dragged.Button.IsDragging = true;
     }
 
     private void MoveDraggedTab(BrowserTab tab, Point screenLocation)
@@ -3682,8 +5958,9 @@ public sealed class MainForm : SnapWindowForm
         if (!ReferenceEquals(_draggedTab, tab) || tab.IsClosing) return;
 
         var pointer = _tabsFlow.PointToClient(screenLocation);
-        var remaining = _tabs.Where(item => !ReferenceEquals(item, tab)).ToList();
+        var remaining = GetDisplayedTabs().Where(item => !_draggedTabs.Contains(item)).ToList();
         var targetIndex = remaining.Count;
+        var groupTarget = remaining.FirstOrDefault(item => item.Button.Bounds.Contains(pointer));
         for (var index = 0; index < remaining.Count; index++)
         {
             var candidate = remaining[index].Button;
@@ -3693,23 +5970,54 @@ public sealed class MainForm : SnapWindowForm
                 break;
             }
         }
+        SetDragGroupTarget(groupTarget is null ? null : GetTabGroup(groupTarget));
 
-        var currentIndex = _tabs.IndexOf(tab);
-        if (currentIndex == targetIndex) return;
-
-        _tabs.Remove(tab);
-        _tabs.Insert(Math.Min(targetIndex, _tabs.Count), tab);
+        var workspaceTabs = _tabs.Where(item => item.WorkspaceId == tab.WorkspaceId).ToList();
+        var moving = workspaceTabs.Where(item => _draggedTabs.Contains(item)).ToList();
+        if (moving.Count == 0) return;
+        workspaceTabs.RemoveAll(item => _draggedTabs.Contains(item));
+        targetIndex = Math.Clamp(targetIndex, 0, workspaceTabs.Count);
+        if (targetIndex <= workspaceTabs.Count)
+            workspaceTabs.InsertRange(targetIndex, moving);
+        ReplaceWorkspaceTabOrder(tab.WorkspaceId, workspaceTabs);
         LayoutTabs();
+    }
+
+    private void SetDragGroupTarget(TugleTabGroup? group)
+    {
+        var newTarget = group is null || _draggedTabs.All(tab => tab.GroupId == group.Id) ? null :
+            _tabs.FirstOrDefault(tab => tab.GroupId == group.Id && tab.WorkspaceId == group.WorkspaceId && !tab.IsClosing);
+        if (ReferenceEquals(_dragGroupTarget, newTarget)) return;
+        if (_dragGroupTarget is not null) _dragGroupTarget.Button.DropTarget = false;
+        _dragGroupTarget = newTarget;
+        if (_dragGroupTarget is not null) _dragGroupTarget.Button.DropTarget = true;
     }
 
     private void EndTabDrag(BrowserTab tab)
     {
         if (!ReferenceEquals(_draggedTab, tab)) return;
 
+        var targetGroupId = _dragGroupTarget is null ? null : GetTabGroup(_dragGroupTarget)?.Id;
+        if (_dragGroupTarget is not null) _dragGroupTarget.Button.DropTarget = false;
+        _dragGroupTarget = null;
         _draggedTab = null;
         _tabsFlow.Cursor = Cursors.Default;
-        tab.Button.IsDragging = false;
+        foreach (var dragged in _draggedTabs) dragged.Button.IsDragging = false;
+        if (targetGroupId is { } groupId) AssignTabsToGroup(_draggedTabs, groupId);
+        _draggedTabs.Clear();
         OrderPinnedTabs();
+        CapturePreviousSession();
+        SaveSettings();
+    }
+
+    private void ReplaceWorkspaceTabOrder(Guid workspaceId, IReadOnlyList<BrowserTab> ordered)
+    {
+        var cursor = 0;
+        for (var index = 0; index < _tabs.Count; index++)
+        {
+            if (_tabs[index].WorkspaceId != workspaceId) continue;
+            _tabs[index] = ordered[cursor++];
+        }
     }
 
     private void UpdateAddressBar()
@@ -3752,29 +6060,13 @@ public sealed class MainForm : SnapWindowForm
         _reloadButton.ForeColor = loading ? _accent : _iconVisible;
     }
 
-    private string BuildSearchUrl(string query)
-    {
-        var template = _settings.SearchEngine switch
-        {
-            "DuckDuckGo" => "https://duckduckgo.com/?q={query}",
-            "Bing" => "https://www.bing.com/search?q={query}",
-            "Brave" => "https://search.brave.com/search?q={query}",
-            "Custom" when IsSearchTemplate(_settings.CustomSearchUrl ?? string.Empty) => _settings.CustomSearchUrl!,
-            _ => "https://www.google.com/search?hl=en&sourceid=tugle&q={query}"
-        };
-        return template.Replace("{query}", Uri.EscapeDataString(query), StringComparison.Ordinal);
-    }
+    private string BuildSearchUrl(string query) => SearchProvider.BuildUrl(_settings.SearchEngine, query);
 
     private static string GetVisitTitle(string url, string? pageTitle)
     {
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
-            if (uri.Host.EndsWith("google.com", StringComparison.OrdinalIgnoreCase) &&
-                uri.AbsolutePath.Equals("/search", StringComparison.OrdinalIgnoreCase))
-            {
-                var query = GetQueryParameter(uri.Query, "q");
-                if (!string.IsNullOrWhiteSpace(query)) return $"Search: {query}";
-            }
+            if (SearchProvider.GetQuery(url) is { Length: > 0 } query) return $"Search: {query}";
 
             return string.IsNullOrWhiteSpace(pageTitle) ? uri.Host : pageTitle.Trim();
         }
@@ -3784,27 +6076,12 @@ public sealed class MainForm : SnapWindowForm
 
     private void RecordSearchFromNavigation(string url)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            !uri.Host.EndsWith("google.com", StringComparison.OrdinalIgnoreCase) ||
-            !uri.AbsolutePath.Equals("/search", StringComparison.OrdinalIgnoreCase)) return;
-
-        var query = GetQueryParameter(uri.Query, "q");
+        var query = SearchProvider.GetQuery(url);
         if (!string.IsNullOrWhiteSpace(query))
         {
             _history.RecordSearch(query);
             RefreshHistoryFlyoutIfVisible();
         }
-    }
-
-    private static string? GetQueryParameter(string query, string name)
-    {
-        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var pair = part.Split('=', 2);
-            if (WebUtility.UrlDecode(pair[0]).Equals(name, StringComparison.OrdinalIgnoreCase))
-                return pair.Length == 2 ? WebUtility.UrlDecode(pair[1]) : string.Empty;
-        }
-        return null;
     }
 
     private static bool IsHomeSource(string? source)
@@ -3930,6 +6207,48 @@ public sealed class MainForm : SnapWindowForm
 
     private bool TryHandleBrowserShortcut(Keys keyData)
     {
+        if (keyData == (Keys.Control | Keys.Shift | Keys.P))
+        {
+            BeginInvoke(ShowCommandPalette);
+            return true;
+        }
+
+        if (keyData == (Keys.Control | Keys.Shift | Keys.S))
+        {
+            _ = ToggleSplitWithNextTabAsync();
+            return true;
+        }
+
+        if (!_isPrivate && keyData == (Keys.Control | Keys.Shift | Keys.W))
+        {
+            BeginInvoke(ShowWorkspaceMenu);
+            return true;
+        }
+
+        if (!_isPrivate && keyData == (Keys.Control | Keys.Alt | Keys.Left))
+        {
+            SwitchWorkspaceByOffset(-1);
+            return true;
+        }
+
+        if (!_isPrivate && keyData == (Keys.Control | Keys.Alt | Keys.Right))
+        {
+            SwitchWorkspaceByOffset(1);
+            return true;
+        }
+
+        if (!_isPrivate && (keyData & (Keys.Control | Keys.Alt)) == (Keys.Control | Keys.Alt))
+        {
+            var keyCode = keyData & Keys.KeyCode;
+            if (keyCode is >= Keys.D1 and <= Keys.D9)
+            {
+                var index = (int)keyCode - (int)Keys.D1;
+                if (index < _settings.Workspaces.Count)
+                    _ = SwitchWorkspaceAsync(_settings.Workspaces[index].Id);
+                return true;
+            }
+        }
+
         if (keyData == (Keys.Control | Keys.T))
         {
             _ = RequestNewTabAsync();
@@ -3993,6 +6312,15 @@ public sealed class MainForm : SnapWindowForm
         }
 
         return false;
+    }
+
+    private void SwitchWorkspaceByOffset(int offset)
+    {
+        if (_isPrivate || _settings.Workspaces.Count < 2) return;
+        var currentIndex = _settings.Workspaces.FindIndex(workspace => workspace.Id == ActiveWorkspaceId);
+        if (currentIndex < 0) currentIndex = 0;
+        var nextIndex = (currentIndex + offset + _settings.Workspaces.Count) % _settings.Workspaces.Count;
+        _ = SwitchWorkspaceAsync(_settings.Workspaces[nextIndex].Id);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -4090,6 +6418,7 @@ public sealed class MainForm : SnapWindowForm
         {
             UnregisterF11HotKey();
             _suspendTimer.Dispose();
+            _bookmarkIconCancellation.Cancel();
             _history.Dispose();
             _tooltips.Dispose();
             foreach (var tab in _tabs)
@@ -4180,14 +6509,137 @@ internal sealed class CloseGlyphButton : Button
     }
 }
 
+internal sealed class WorkspaceSwitchButton : Button
+{
+    public float UiScale { get; set; } = 0.9f;
+    public string WorkspaceName
+    {
+        get => _workspaceName;
+        set
+        {
+            _workspaceName = string.IsNullOrWhiteSpace(value) ? "Personal" : value.Trim();
+            Invalidate();
+        }
+    }
+    public string WorkspaceIcon
+    {
+        get => _workspaceIcon;
+        set
+        {
+            _workspaceIcon = string.IsNullOrWhiteSpace(value) ? "●" : value.Trim();
+            Invalidate();
+        }
+    }
+    public Color WorkspaceColor
+    {
+        get => _workspaceColor;
+        set
+        {
+            _workspaceColor = value;
+            Invalidate();
+        }
+    }
+
+    private string _workspaceName = "Personal";
+    private string _workspaceIcon = "●";
+    private Color _workspaceColor = Color.FromArgb(96, 149, 229);
+    private bool _hovered;
+
+    public WorkspaceSwitchButton()
+    {
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        UseVisualStyleBackColor = false;
+        Text = string.Empty;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var theme = TugleTheme.Current;
+        e.Graphics.Clear(Parent?.BackColor ?? BackColor);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        var bounds = new RectangleF(.5f, .5f, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
+        var radius = Math.Min(Ui(10), bounds.Height / 2f);
+        using var path = new GraphicsPath();
+        path.AddArc(bounds.Left, bounds.Top, radius * 2, radius * 2, 180, 90);
+        path.AddArc(bounds.Right - radius * 2, bounds.Top, radius * 2, radius * 2, 270, 90);
+        path.AddArc(bounds.Right - radius * 2, bounds.Bottom - radius * 2, radius * 2, radius * 2, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - radius * 2, radius * 2, radius * 2, 90, 90);
+        path.CloseFigure();
+        using var fill = new SolidBrush(_hovered ? theme.SurfaceHover : theme.Surface);
+        using var border = new Pen(_hovered ? theme.BorderStrong : theme.Border);
+        e.Graphics.FillPath(fill, path);
+        e.Graphics.DrawPath(border, path);
+
+        var dot = new Rectangle(Ui(9), Math.Max(Ui(4), (Height - Ui(12)) / 2), Ui(12), Ui(12));
+        using var dotFill = new SolidBrush(WorkspaceColor.IsEmpty ? theme.Accent : WorkspaceColor);
+        e.Graphics.FillEllipse(dotFill, dot);
+        var iconBounds = new Rectangle(dot.Right + Ui(6), 0, Ui(16), Height);
+        TextRenderer.DrawText(e.Graphics, WorkspaceIcon, Font, iconBounds, ForeColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        var chevronWidth = Ui(16);
+        var textBounds = new Rectangle(iconBounds.Right + Ui(3), 0,
+            Math.Max(1, Width - iconBounds.Right - chevronWidth - Ui(10)), Height);
+        TextRenderer.DrawText(e.Graphics, WorkspaceName, Font, textBounds, ForeColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        var chevronX = Width - Ui(12);
+        var centerY = Height / 2f;
+        using var chevron = new Pen(theme.Icon, Math.Max(1f, Ui(1.2f)))
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        e.Graphics.DrawLine(chevron, chevronX - Ui(3), centerY - Ui(2), chevronX, centerY + Ui(1));
+        e.Graphics.DrawLine(chevron, chevronX, centerY + Ui(1), chevronX + Ui(3), centerY - Ui(2));
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hovered = true;
+        base.OnMouseEnter(e);
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hovered = false;
+        base.OnMouseLeave(e);
+        Invalidate();
+    }
+
+    private int Ui(float logicalPixels) => Math.Max(1, (int)Math.Round(logicalPixels * UiScale * DeviceDpi / 96f));
+}
+
 internal sealed class TabButton : Button
 {
     public float UiScale { get; set; } = 0.9f;
 
     public bool Active { get; set; }
+    public bool Selected
+    {
+        get => _selected;
+        set
+        {
+            if (_selected == value) return;
+            _selected = value;
+            Invalidate();
+        }
+    }
     public bool Muted { get; set; }
     public bool PlayingAudio { get; set; }
     private bool ShowMute => PlayingAudio || Muted;
+    public Color GroupColor
+    {
+        get => _groupColor;
+        set
+        {
+            if (_groupColor.ToArgb() == value.ToArgb()) return;
+            _groupColor = value;
+            Invalidate();
+        }
+    }
     public bool Pinned
     {
         get => _pinned;
@@ -4209,6 +6661,16 @@ internal sealed class TabButton : Button
         }
     }
     public bool IsDragging { get; set; }
+    public bool DropTarget
+    {
+        get => _dropTarget;
+        set
+        {
+            if (_dropTarget == value) return;
+            _dropTarget = value;
+            Invalidate();
+        }
+    }
     public Image? Favicon
     {
         get => _favicon;
@@ -4226,6 +6688,7 @@ internal sealed class TabButton : Button
     public event EventHandler? DragEnded;
 
     private Image? _favicon;
+    private Color _groupColor = Color.Empty;
     private bool _hovered;
     private bool _hoverClose;
     private bool _hoverMute;
@@ -4234,6 +6697,8 @@ internal sealed class TabButton : Button
     private bool _dragging;
     private bool _isCompact;
     private bool _pinned;
+    private bool _selected;
+    private bool _dropTarget;
     private Point _dragStart;
 
     private Rectangle CloseBounds
@@ -4253,6 +6718,19 @@ internal sealed class TabButton : Button
             if (!ShowMute) return Rectangle.Empty;
             var size = Ui(26);
             return new(Math.Max(0, CloseBounds.Left - Ui(1) - size), Math.Max(0, (Height - size) / 2), size, size);
+        }
+    }
+
+    // Keep the workspace accent away from the close/mute controls so it never
+    // changes their hit target or makes the tab strip visually busy.
+    public Rectangle GroupIndicatorBounds
+    {
+        get
+        {
+            if (GroupColor.IsEmpty) return Rectangle.Empty;
+            var left = Ui(10);
+            var right = Math.Max(left + Ui(12), CloseBounds.Left - Ui(8));
+            return new Rectangle(left, Ui(3), Math.Max(1, right - left), Math.Max(1, Ui(2)));
         }
     }
 
@@ -4282,12 +6760,29 @@ internal sealed class TabButton : Button
         path.CloseFigure();
 
         var theme = TugleTheme.Current;
-        var fillColor = Active ? theme.ActiveTab : _hovered ? theme.TabHover : theme.Surface;
+        var fillColor = Active ? theme.ActiveTab : Selected ? theme.Selection : _hovered ? theme.TabHover : theme.Surface;
         if (IsDragging) fillColor = theme.TabDragging;
         using var fill = new SolidBrush(fillColor);
         using var border = new Pen(Active ? theme.BorderStrong : theme.Border);
         e.Graphics.FillPath(fill, path);
         e.Graphics.DrawPath(border, path);
+        if (DropTarget)
+        {
+            using var dropBorder = new Pen(GroupColor.IsEmpty ? theme.Accent : GroupColor, Math.Max(1f, Ui(2)));
+            e.Graphics.DrawPath(dropBorder, path);
+        }
+
+        var groupIndicator = GroupIndicatorBounds;
+        if (!groupIndicator.IsEmpty)
+        {
+            using var groupPen = new Pen(GroupColor, Math.Max(1f, groupIndicator.Height))
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round
+            };
+            var indicatorY = groupIndicator.Top + groupIndicator.Height / 2f;
+            e.Graphics.DrawLine(groupPen, groupIndicator.Left, indicatorY, groupIndicator.Right, indicatorY);
+        }
 
         var iconSize = Math.Min(Ui(IsCompact ? 14 : 16), Math.Max(1, Height - Ui(10)));
         var iconBounds = new Rectangle(Ui(IsCompact ? 6 : 12), (Height - iconSize) / 2, iconSize, iconSize);

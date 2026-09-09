@@ -1,5 +1,23 @@
 # What’s new
 
+## 2.3.0 — Workspaces, split view, and browser polish
+
+- Added workspaces with separate tab sets, startup pages, search and privacy preferences, colors, icons, templates, and portable backups.
+- Added collapsible tab groups, multi-tab selection, drag-and-drop grouping, automatic grouping rules, and workspace memory controls.
+- Added a searchable command palette (`Ctrl+Shift+P`) and split view (`Ctrl+Shift+S`) with a draggable divider and double-click reset.
+- Added smart site routing into workspaces and groups, with clearer routing choices and explicit route removal.
+- Polished palette spacing, search ranking, empty results, and accessibility labels.
+- Updated the application and installer to 2.3.0 so older versions detect the new public release.
+
+- Removed bookmark help paragraphs and the saved-pages heading/count.
+- Made Bookmark this page a larger, filled action at the top of the panel.
+- Bookmarks display their page icons and keep small local thumbnails for fast reopening. Older bookmarks fetch missing icons with bounded downloads and a safe fallback.
+- Settings now opens with just Google account and Browser settings.
+- Google website sign-in stays inside Tugle's own profile. Removed the misleading external-browser handoff and saved connection flag; Google restrictions are reported without claiming a successful connection.
+- Removed Brave and custom search engines. Home and the address bar share Google, DuckDuckGo, or Bing; switching away from Google also stops Google autocomplete requests.
+- Search URLs safely encode special characters and all supported search results are excluded from Most used sites.
+- Fixed title-bar docking, scaled window controls, and native caption handling; browser chrome and page bounds relayout together when changing GUI scale.
+
 ## 1.2.1 — Public update
 
 - Published the complete 1.2 feature and polish update, including the Windows installer and portable download.

@@ -8,6 +8,7 @@ internal sealed class LibraryEntry
     public string Url { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string? IconUrl { get; set; }
+    public string? IconPng { get; set; }
     public DateTime AddedAt { get; set; } = DateTime.UtcNow;
 }
 
@@ -40,6 +41,7 @@ internal sealed class LibraryStore
                 if (entry.Id == Guid.Empty || _entries.Any(item => item.Id == entry.Id)) entry.Id = Guid.NewGuid();
                 entry.Title = string.IsNullOrWhiteSpace(entry.Title) ? new Uri(entry.Url).Host : entry.Title.Trim();
                 entry.IconUrl = string.IsNullOrWhiteSpace(entry.IconUrl) ? null : entry.IconUrl.Trim();
+                if (entry.IconPng?.Length > 32768) entry.IconPng = null;
                 _entries.Add(entry);
             }
         }
@@ -82,9 +84,19 @@ internal sealed class LibraryStore
         if (entry is null || !IsRestorableUrl(url)) return false;
         url = NormalizeUrl(url);
         if (_entries.Any(item => item.Id != id && item.Url == url)) return false;
-        if (entry.Url != url) entry.IconUrl = null;
+        if (entry.Url != url) { entry.IconUrl = null; entry.IconPng = null; }
         entry.Url = url;
         entry.Title = string.IsNullOrWhiteSpace(title) ? new Uri(url).Host : title.Trim();
+        Save();
+        return true;
+    }
+
+    public bool UpdateIcon(Guid id, string pageUrl, string? iconUrl, string png)
+    {
+        var entry = _entries.FirstOrDefault(item => item.Id == id && item.Url == pageUrl);
+        if (entry is null || png.Length > 32768 || (entry.IconPng == png && entry.IconUrl == iconUrl)) return false;
+        entry.IconPng = png;
+        entry.IconUrl = iconUrl;
         Save();
         return true;
     }

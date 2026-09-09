@@ -37,7 +37,7 @@ public class SnapWindowForm : Form
             DefWndProc(ref m);
             return;
         }
-        if (m.Msg == 0x0083 && m.WParam != IntPtr.Zero) // WM_NCCALCSIZE
+        if (m.Msg == 0x0083) // WM_NCCALCSIZE, both RECT and NCCALCSIZE_PARAMS forms.
         {
             if (WindowState == FormWindowState.Maximized && !IsImmersiveFullscreen)
             {

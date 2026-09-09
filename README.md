@@ -9,13 +9,13 @@ Tugle is a lightweight Windows browser with a focused, custom interface.
 - Address bar that accepts URLs or search text
 - Back, forward, reload, and home buttons
 - History menu with the 12 most recent visits (`Ctrl+H`)
-- Searchable local bookmarks with editing, removal, and open-in-new-tab controls (`Ctrl+D` saves the current page). Former Read later links remain available as bookmarks.
+- Searchable local bookmarks with page icons, editing, removal, and open-in-new-tab controls (`Ctrl+D` saves the current page). Small icon thumbnails are cached locally. Former Read later links remain available as bookmarks.
 - Pinned tabs and recently closed tabs (`Ctrl+Shift+T`)
 - GUI-scale menu for compact through large browser chrome (70% to 140%)
 - Downloads menu with progress plus pause, resume, and cancel controls when the runtime supports them (`Ctrl+J`)
 - Private windows (`Ctrl+Shift+N`), browser-data cleanup, tracking-prevention levels, and visible blocker status
 - PDF saving (`Ctrl+P`) and configurable address-bar search
-- Accounts panel with Google sign-in handoff and connection status
+- Two-section Settings panel with Google website sign-in and browser preferences
 - Update checks through GitHub Releases
 - Three-step first-run setup: Google account, theme, and background
 - Persistent settings and a persistent WebView2 profile across restarts
@@ -28,7 +28,7 @@ The start page is stored locally in `TugleHome.html` and loaded as a normal page
 
 ## Search engine
 
-Text that is not a URL is sent to the selected search provider. Accounts → Search engine lets you choose Google, DuckDuckGo, Bing, Brave, or a custom HTTP(S) URL containing `{query}`. Direct URLs still open directly.
+Text that is not a URL is sent to the selected search provider. Settings → Browser settings → Search engine offers Google, DuckDuckGo, or Bing. Home and the address bar use the same choice. Brave and custom-engine settings from older versions migrate to Google without resetting other preferences. Direct URLs still open directly. Google autocomplete is only requested when Google is selected; DuckDuckGo and Bing use local suggestions.
 
 The search behavior is in `MainForm.cs`, inside `NavigateFromAddressBar()`.
 
@@ -53,17 +53,17 @@ Tugle starts maximized and supports native Windows snapping, resizing, and the m
 
 Setup version 7 uses the main browser palette, Tugle branding, and minimal text. Theme has its own page with named color choices and a custom color picker. Background has its own page with Color, Gradient, Picture, and Video options beside a live home-page preview. Custom theme accents and selected media paths persist across restarts. Closing setup leaves it incomplete so it appears again on next launch. Done saves appearance before opening the home page. Existing history and website sessions are preserved.
 
-Google sign-in opens in the system browser instead of an embedded WebView. Setup provides an explicit Continue button after the user returns. Existing Google sessions already present in Tugle are recognized, but system-browser cookies are intentionally not copied into WebView2. Full Google account linking would require a registered OAuth desktop client and is not claimed by this handoff. No Google password is collected by setup.
+Google sign-in opens inside Tugle using its persistent website profile. Setup advances only when that profile has a Google authentication cookie. Closing the sign-in window does not mark the account as connected. Google may refuse sign-in in an embedded browser; Tugle shows this restriction and lets setup continue without signing in. It does not spoof another browser or copy system-browser cookies.
 
-Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. Installed copies download a newer Windows installer in the background and ask to restart when it is ready; the installer closes Tugle, preserves the profile, and launches the updated app. Portable copies open the release download instead, since a running portable folder cannot safely replace itself. The same check is available from Settings → Check for updates.
+Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. Installed copies download a newer Windows installer in the background and ask to restart when it is ready; the installer closes Tugle, preserves the profile, and launches the updated app. Portable copies open the release download instead, since a running portable folder cannot safely replace itself. The same check is available from Settings → Browser settings → Check for updates.
 
-Pushing a tag such as `v1.2.1` builds and publishes both `Tugle-Setup.exe` and `Tugle-browser.zip` through the GitHub Actions release workflow. Update `RELEASE_NOTES.md` before tagging.
+Pushing a tag such as `v2.3.0` builds and publishes both `Tugle-Setup.exe` and `Tugle-browser.zip` through the GitHub Actions release workflow. Update `RELEASE_NOTES.md` before tagging.
 
 For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separate profile folder. Settings, history, and WebView2 data then use that folder. Leave it unset for normal use.
 
 ## Accounts and Google sign-in
 
-The Accounts toolbar button opens Google in the system browser and shows the account panel when you return. Tugle does not collect or store a Google password. Existing sessions inside Tugle are detected from its own WebView2 profile; system-browser cookies are not copied into Tugle. A future sync service would need an explicit provider and separate encryption design.
+Settings has two top-level choices: Google account and Browser settings. Google account opens or reuses a normal Tugle tab for signing in to Google websites, managing an existing session, or signing out of this profile. Connection status is checked from Tugle's own WebView2 cookies rather than a saved boolean. This is website sign-in, not a Tugle sync account. Credentials are entered only on Google's HTTPS page, never in a Tugle password form. A fresh private window keeps its Google session separate from the regular profile. Google can still block embedded-browser sign-in; this is not bypassed or represented as a successful connection.
 
 ## Ad blocking
 
