@@ -233,6 +233,7 @@ public sealed class MainForm : SnapWindowForm
         public Task? InitializationTask { get; set; }
         public bool DeferredNavigation { get; set; }
         public bool IsPinned { get; set; }
+        public bool IsHidden { get; set; }
         public Guid? GroupId { get; set; }
         public bool FallbackHostFilterRegistered { get; set; }
         public bool IsClosing { get; set; }
@@ -952,23 +953,27 @@ public sealed class MainForm : SnapWindowForm
             if (tab is null) continue;
 
             tab.Id = savedTab.Id == Guid.Empty ? tab.Id : savedTab.Id;
-            firstTab ??= tab.WorkspaceId == ActiveWorkspaceId ? tab : firstTab;
             tab.Title = string.IsNullOrWhiteSpace(savedTab.Title) ? tab.Title : savedTab.Title;
             tab.IsPinned = savedTab.IsPinned;
+            tab.IsHidden = savedTab.IsHidden;
             tab.GroupId = GetValidTabGroupId(savedTab.GroupId, tab.WorkspaceId);
             tab.IsHome = savedTab.IsHome;
             tab.DeferredNavigation = true;
             tab.InitialNavigationTarget = savedTab.Url;
             UpdateTabButton(tab);
 
-            if (savedTab.IsActive && tab.WorkspaceId == ActiveWorkspaceId) activeTab = tab;
+            if (!tab.IsHidden && tab.WorkspaceId == ActiveWorkspaceId)
+            {
+                firstTab ??= tab;
+                if (savedTab.IsActive) activeTab = tab;
+            }
         }
 
         OrderPinnedTabs();
 
         var rememberedId = _settings.ActiveWorkspace.LastActiveTabId;
         if (rememberedId is { } lastActiveId)
-            activeTab = _tabs.FirstOrDefault(tab => tab.WorkspaceId == ActiveWorkspaceId && tab.Id == lastActiveId) ?? activeTab;
+            activeTab = _tabs.FirstOrDefault(tab => tab.WorkspaceId == ActiveWorkspaceId && tab.Id == lastActiveId && !tab.IsClosing && !tab.IsHidden) ?? activeTab;
 
         var tabToActivate = activeTab ?? firstTab;
         if (tabToActivate is not null)
@@ -1013,6 +1018,7 @@ public sealed class MainForm : SnapWindowForm
                 IsHome = true,
                 IsActive = ReferenceEquals(tab, _activeTab),
                 IsPinned = tab.IsPinned,
+                IsHidden = tab.IsHidden,
                 GroupId = tab.GroupId,
                 Title = tab.Title
             };
@@ -1026,6 +1032,7 @@ public sealed class MainForm : SnapWindowForm
                 Url = url,
                 IsActive = ReferenceEquals(tab, _activeTab),
                 IsPinned = tab.IsPinned,
+                IsHidden = tab.IsHidden,
                 GroupId = tab.GroupId,
                 Title = tab.Title
             }
@@ -1069,6 +1076,9 @@ public sealed class MainForm : SnapWindowForm
         tab.Id = savedTab.Id == Guid.Empty ? tab.Id : savedTab.Id;
         tab.Title = string.IsNullOrWhiteSpace(savedTab.Title) ? tab.Title : savedTab.Title;
         tab.IsPinned = savedTab.IsPinned;
+        // Reopening a closed tab is an explicit show action, even if it had
+        // previously been hidden from the tab strip.
+        tab.IsHidden = false;
         tab.GroupId = GetValidTabGroupId(savedTab.GroupId, tab.WorkspaceId);
         UpdateTabButton(tab);
         if (savedTab.IsHome)
@@ -2069,6 +2079,9 @@ public sealed class MainForm : SnapWindowForm
         var muteItem = new ToolStripMenuItem();
         muteItem.Click += (_, _) => ToggleTabMute(tab);
 
+        var hideItem = new ToolStripMenuItem("Hide tab");
+        hideItem.Click += (_, _) => _ = HideTabsAsync(GetTabsForOperation(tab));
+
         var duplicateItem = new ToolStripMenuItem("Duplicate tab");
         duplicateItem.Click += async (_, _) => await DuplicateTabAsync(tab);
 
@@ -2102,13 +2115,17 @@ public sealed class MainForm : SnapWindowForm
             muteItem.Checked = tab.IsMuted;
             muteItem.Visible = tab.IsPlayingAudio || tab.IsMuted;
             pinItem.Text = tab.IsPinned ? "Unpin tab" : "Pin tab";
+            var selectedCount = GetTabsForOperation(tab).Count;
+            hideItem.Text = selectedCount > 1 ? $"Hide {selectedCount} selected tabs" : "Hide tab";
+            hideItem.Visible = !_isPrivate && !tab.IsClosing;
+            hideItem.Enabled = hideItem.Visible;
             bookmarkItem.Text = IsPageBookmarked(tab) ? "Remove bookmark" : "Bookmark page";
             duplicateItem.Enabled = !tab.IsClosing;
             reloadItem.Enabled = !tab.IsClosing && tab.View.CoreWebView2 is not null;
             pinItem.Enabled = !tab.IsClosing;
             workspaceItem.Enabled = !_isPrivate && !tab.IsClosing && _tabs.Contains(tab);
             moveWorkspaceItem.Enabled = workspaceItem.Enabled && _settings.Workspaces.Count > 1;
-            var splitCandidateExists = ActiveWorkspaceTabs.Any(item => !ReferenceEquals(item, tab));
+            var splitCandidateExists = GetDisplayedTabs().Any(item => !ReferenceEquals(item, tab));
             splitItem.Visible = !tab.IsClosing && tab.WorkspaceId == ActiveWorkspaceId && splitCandidateExists;
             splitItem.Text = IsSplitParticipant(tab) ? "Close split view" : "Open in split view";
             splitItem.Enabled = splitItem.Visible;
@@ -2123,6 +2140,7 @@ public sealed class MainForm : SnapWindowForm
         menu.Items.Add(splitItem);
         menu.Items.Add(duplicateItem);
         menu.Items.Add(bookmarkItem);
+        menu.Items.Add(hideItem);
         menu.Items.Add(pdfItem);
         menu.Items.Add(reloadItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -2790,8 +2808,9 @@ public sealed class MainForm : SnapWindowForm
             var workspaceName = _isPrivate ? "Private" : GetWorkspace(target.WorkspaceId)?.Name ?? "Workspace";
             entries.Add(new CommandPaletteEntry(
                 "Tab",
-                target.Title,
-                $"{workspaceName} · {GetTabHost(target) ?? (target.IsHome ? "Tugle Home" : "New tab")}",
+                target.IsHidden ? $"Hidden · {target.Title}" : target.Title,
+                $"{workspaceName} · {GetTabHost(target) ?? (target.IsHome ? "Tugle Home" : "New tab")}" +
+                (target.IsHidden ? " · Select to show" : string.Empty),
                 () => _ = ActivateTabAsync(target)));
         }
 
@@ -2832,6 +2851,14 @@ public sealed class MainForm : SnapWindowForm
             _workspaceMenu.Items.Add(item);
         }
 
+        var hiddenCount = _tabs.Count(tab => !tab.IsClosing && tab.WorkspaceId == ActiveWorkspaceId && tab.IsHidden);
+        if (hiddenCount > 0)
+        {
+            var showHidden = new ToolStripMenuItem($"Show hidden tabs ({hiddenCount})");
+            showHidden.Click += (_, _) => ShowHiddenTabs();
+            _workspaceMenu.Items.Add(showHidden);
+        }
+
         _workspaceMenu.Items.Add(new ToolStripSeparator());
         var newWorkspace = new ToolStripMenuItem("New workspace…")
         {
@@ -2855,6 +2882,16 @@ public sealed class MainForm : SnapWindowForm
         var rename = new ToolStripMenuItem("Rename…");
         rename.Click += (_, _) => RenameWorkspace(active.Id);
         manage.DropDownItems.Add(rename);
+
+        var deleteWorkspace = new ToolStripMenuItem("Delete workspace…")
+        {
+            Enabled = _settings.Workspaces.Count > 1,
+            ToolTipText = _settings.Workspaces.Count > 1
+                ? "Move its tabs to another workspace"
+                : "Keep at least one workspace"
+        };
+        deleteWorkspace.Click += async (_, _) => await DeleteWorkspaceAsync(active.Id);
+        manage.DropDownItems.Add(deleteWorkspace);
 
         var color = new ToolStripMenuItem("Color");
         foreach (var choice in WorkspaceColors)
@@ -3043,9 +3080,9 @@ public sealed class MainForm : SnapWindowForm
 
         var activeWorkspace = _settings.ActiveWorkspace;
         var tab = activeWorkspace.LastActiveTabId is { } rememberedId
-            ? _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && item.Id == rememberedId && !item.IsClosing)
+            ? _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && item.Id == rememberedId && !item.IsClosing && !item.IsHidden)
             : null;
-        tab ??= _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && !item.IsClosing);
+        tab ??= _tabs.FirstOrDefault(item => item.WorkspaceId == workspaceId && !item.IsClosing && !item.IsHidden);
         if (tab is not null && GetTabGroup(tab) is { IsCollapsed: true } group)
             tab = GetCollapsedGroupRepresentative(group.Id) ?? tab;
         if (tab is null)
@@ -3137,6 +3174,76 @@ public sealed class MainForm : SnapWindowForm
         }
         SaveSettings();
         _ = SwitchWorkspaceAsync(workspace.Id);
+    }
+
+    private async Task<bool> DeleteWorkspaceAsync(Guid workspaceId)
+    {
+        if (_isPrivate || _settings.Workspaces.Count <= 1 || GetWorkspace(workspaceId) is not { } workspace)
+            return false;
+
+        var workspaceIndex = _settings.Workspaces.FindIndex(item => item.Id == workspaceId);
+        if (workspaceIndex < 0) return false;
+        var target = workspaceId == ActiveWorkspaceId
+            ? _settings.Workspaces[(workspaceIndex + 1) % _settings.Workspaces.Count]
+            : _settings.ActiveWorkspace;
+        var tabs = _tabs.Where(tab => !tab.IsClosing && tab.WorkspaceId == workspaceId).ToArray();
+        var tabSummary = tabs.Length == 0
+            ? "It has no open tabs."
+            : $"Its {tabs.Length} open tab{(tabs.Length == 1 ? string.Empty : "s")} will move to {target.Name}.";
+        var choice = MessageBox.Show(
+            this,
+            $"Delete workspace \"{workspace.Name}\"?\n\n{tabSummary}",
+            "Delete workspace",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (choice != DialogResult.OK) return false;
+
+        if (HasSplitView && tabs.Any(IsSplitParticipant))
+            CloseSplitView(revealActive: false);
+
+        foreach (var tab in tabs)
+        {
+            tab.WorkspaceId = target.Id;
+            tab.GroupId = null;
+            UpdateTabButton(tab);
+        }
+
+        var movedActive = tabs.FirstOrDefault(tab => ReferenceEquals(tab, _activeTab));
+        if (movedActive is not null && target.LastActiveTabId is null)
+            target.LastActiveTabId = movedActive.Id;
+
+        var deletedGroupIds = _settings.TabGroups
+            .Where(group => group.WorkspaceId == workspaceId)
+            .Select(group => group.Id)
+            .ToHashSet();
+        _settings.TabGroups.RemoveAll(group => deletedGroupIds.Contains(group.Id));
+        foreach (var closedTab in _settings.RecentlyClosedTabs)
+        {
+            if (closedTab.GroupId is { } groupId && deletedGroupIds.Contains(groupId))
+                closedTab.GroupId = null;
+        }
+        foreach (var remainingWorkspace in _settings.Workspaces)
+            remainingWorkspace.Rules.RemoveAll(rule => rule.TargetGroupId is { } groupId && deletedGroupIds.Contains(groupId));
+        _settings.WorkspaceRoutes.RemoveAll(route => route.TargetWorkspaceId == workspaceId);
+        foreach (var route in _settings.WorkspaceRoutes)
+        {
+            if (route.TargetGroupId is { } groupId && deletedGroupIds.Contains(groupId))
+                route.TargetGroupId = null;
+        }
+
+        if (workspaceId == ActiveWorkspaceId)
+        {
+            await SwitchWorkspaceAsync(target.Id);
+        }
+
+        _settings.Workspaces.Remove(workspace);
+        ClearTabSelection();
+        UpdateWorkspaceSwitcher();
+        LayoutTabs();
+        CapturePreviousSession();
+        SaveSettings();
+        return true;
     }
 
     private bool RenameWorkspace(Guid workspaceId)
@@ -3282,6 +3389,7 @@ public sealed class MainForm : SnapWindowForm
                 IsHome = tab.IsHome,
                 IsActive = tab.IsActive,
                 IsPinned = tab.IsPinned,
+                IsHidden = tab.IsHidden,
                 GroupId = tab.GroupId,
                 Title = tab.Title
             }).ToList()
@@ -3457,6 +3565,7 @@ public sealed class MainForm : SnapWindowForm
                 : source.Id;
             tab.Title = string.IsNullOrWhiteSpace(source.Title) ? tab.Title : source.Title.Trim()[..Math.Min(120, source.Title.Trim().Length)];
             tab.IsPinned = source.IsPinned;
+            tab.IsHidden = source.IsHidden;
             tab.IsHome = source.IsHome;
             tab.DeferredNavigation = true;
             tab.InitialNavigationTarget = source.Url;
@@ -5324,8 +5433,8 @@ public sealed class MainForm : SnapWindowForm
     }
 
     private bool HasSplitView =>
-        _splitLeftTab is { IsClosing: false } left &&
-        _splitRightTab is { IsClosing: false } right &&
+        _splitLeftTab is { IsClosing: false, IsHidden: false } left &&
+        _splitRightTab is { IsClosing: false, IsHidden: false } right &&
         !ReferenceEquals(left, right) &&
         _tabs.Contains(left) && _tabs.Contains(right) &&
         left.WorkspaceId == right.WorkspaceId &&
@@ -5342,7 +5451,7 @@ public sealed class MainForm : SnapWindowForm
             return;
         }
 
-        var candidate = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, _activeTab));
+        var candidate = GetDisplayedTabs().FirstOrDefault(tab => !ReferenceEquals(tab, _activeTab));
         if (candidate is not null) await OpenSplitViewAsync(candidate);
     }
 
@@ -5362,10 +5471,10 @@ public sealed class MainForm : SnapWindowForm
         if (requested.IsClosing || !_tabs.Contains(requested) || requested.WorkspaceId != ActiveWorkspaceId) return;
 
         var primary = _activeTab;
-        if (primary is null || primary.IsClosing || primary.WorkspaceId != requested.WorkspaceId)
-            primary = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, requested));
+        if (primary is null || primary.IsClosing || primary.IsHidden || primary.WorkspaceId != requested.WorkspaceId)
+            primary = GetDisplayedTabs().FirstOrDefault(tab => !ReferenceEquals(tab, requested));
         else if (ReferenceEquals(primary, requested))
-            primary = ActiveWorkspaceTabs.FirstOrDefault(tab => !ReferenceEquals(tab, requested));
+            primary = GetDisplayedTabs().FirstOrDefault(tab => !ReferenceEquals(tab, requested));
         if (primary is null || primary.IsClosing || ReferenceEquals(primary, requested)) return;
 
         CloseSplitView(revealActive: false);
@@ -5443,6 +5552,55 @@ public sealed class MainForm : SnapWindowForm
         await Task.CompletedTask;
     }
 
+    private async Task HideTabsAsync(IReadOnlyCollection<BrowserTab> sourceTabs)
+    {
+        if (_isPrivate) return;
+        var hidden = sourceTabs
+            .Where(tab => _tabs.Contains(tab) && !tab.IsClosing)
+            .Distinct()
+            .ToArray();
+        if (hidden.Length == 0) return;
+
+        if (HasSplitView && hidden.Any(IsSplitParticipant))
+            CloseSplitView(revealActive: false);
+
+        var hidingActive = hidden.Any(tab => ReferenceEquals(tab, _activeTab));
+        foreach (var tab in hidden)
+            tab.IsHidden = true;
+
+        ClearTabSelection();
+        LayoutTabs();
+        if (!hidingActive)
+        {
+            CapturePreviousSession();
+            SaveSettings();
+            return;
+        }
+
+        var replacement = GetDisplayedTabs().FirstOrDefault(tab => !tab.IsClosing);
+        if (replacement is not null)
+        {
+            await ActivateTabAsync(replacement);
+        }
+        else
+        {
+            await OpenNewTabAsync(showHome: true, activate: true, tabWorkspaceId: ActiveWorkspaceId);
+        }
+        CapturePreviousSession();
+        SaveSettings();
+    }
+
+    private void ShowHiddenTabs()
+    {
+        if (_isPrivate) return;
+        var hidden = _tabs.Where(tab => !tab.IsClosing && tab.WorkspaceId == ActiveWorkspaceId && tab.IsHidden).ToArray();
+        if (hidden.Length == 0) return;
+        foreach (var tab in hidden) tab.IsHidden = false;
+        LayoutTabs();
+        CapturePreviousSession();
+        SaveSettings();
+    }
+
     private void LayoutContentViews()
     {
         if (!HasSplitView || _splitLeftTab is not { } left || _splitRightTab is not { } right)
@@ -5516,8 +5674,8 @@ public sealed class MainForm : SnapWindowForm
         var wasActive = ReferenceEquals(tab, _activeTab);
         if (IsSplitParticipant(tab)) CloseSplitView(revealActive: !wasActive);
         var replacement = wasActive
-            ? _tabs.Skip(index + 1).FirstOrDefault(item => !item.IsClosing && item.WorkspaceId == tab.WorkspaceId) ??
-              _tabs.Take(index).LastOrDefault(item => !item.IsClosing && item.WorkspaceId == tab.WorkspaceId)
+            ? _tabs.Skip(index + 1).FirstOrDefault(item => !item.IsClosing && !item.IsHidden && item.WorkspaceId == tab.WorkspaceId) ??
+              _tabs.Take(index).LastOrDefault(item => !item.IsClosing && !item.IsHidden && item.WorkspaceId == tab.WorkspaceId)
             : null;
 
         // Keep the closing WebView on screen until its replacement is fully
@@ -5541,7 +5699,7 @@ public sealed class MainForm : SnapWindowForm
         tab.Button.ContextMenuStrip?.Dispose();
         tab.Button.Dispose();
 
-        if (_tabs.Count == 0 || (! _isPrivate && !ActiveWorkspaceTabs.Any()))
+        if (_tabs.Count == 0 || (!_isPrivate && !GetDisplayedTabs().Any()))
         {
             _activeTab = null;
             await OpenWorkspaceStartupTabAsync();
@@ -5559,6 +5717,14 @@ public sealed class MainForm : SnapWindowForm
     private async Task ActivateTabAsync(BrowserTab tab)
     {
         if (!_tabs.Contains(tab) || tab.IsClosing) return;
+        if (tab.IsHidden)
+        {
+            tab.IsHidden = false;
+            if (!_isPrivate && GetWorkspace(tab.WorkspaceId) is { } workspace)
+                workspace.LastActiveTabId = tab.Id;
+            UpdateTabButton(tab);
+            LayoutTabs();
+        }
         if (!_isPrivate && tab.WorkspaceId != ActiveWorkspaceId)
         {
             await SwitchWorkspaceAsync(tab.WorkspaceId);
@@ -5893,9 +6059,9 @@ public sealed class MainForm : SnapWindowForm
     }
 
     private BrowserTab? GetCollapsedGroupRepresentative(Guid groupId) =>
-        _activeTab is { IsClosing: false } active && active.GroupId == groupId
+        _activeTab is { IsClosing: false, IsHidden: false } active && active.GroupId == groupId
             ? active
-            : _tabs.FirstOrDefault(tab => !tab.IsClosing && tab.GroupId == groupId);
+            : _tabs.FirstOrDefault(tab => !tab.IsClosing && !tab.IsHidden && tab.GroupId == groupId);
 
     private int GetGroupTabCount(Guid groupId) => _tabs.Count(tab => !tab.IsClosing && tab.GroupId == groupId);
 
@@ -5903,6 +6069,7 @@ public sealed class MainForm : SnapWindowForm
     {
         foreach (var tab in ActiveWorkspaceTabs)
         {
+            if (tab.IsHidden) continue;
             var group = GetTabGroup(tab);
             if (group is not { IsCollapsed: true } || ReferenceEquals(tab, GetCollapsedGroupRepresentative(group.Id)))
                 yield return tab;

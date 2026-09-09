@@ -28,7 +28,7 @@ Tugle is a lightweight Windows browser with a focused, custom interface.
 
 Workspaces are separate tab sets. Click the workspace pill in the tab bar or press `Ctrl+Shift+W` to switch; each row shows its current tab count. Use `New workspace…` for a simple workspace, or choose a template such as School, Work, or Research. The `Manage current workspace` menu handles its name, color, icon, startup page, and preferences. Right-click a tab and choose `Move to workspace` to move one or several selected tabs. Less common tools such as automatic grouping, site routing, and backups are under `More workspace settings`.
 
-`Ctrl+Alt+Left/Right` moves between workspaces, and `Ctrl+Alt+1` through `Ctrl+Alt+9` opens a workspace directly. Workspaces do not share tabs, but they continue to use the same browser profile and saved bookmarks.
+`Ctrl+Alt+Left/Right` moves between workspaces, and `Ctrl+Alt+1` through `Ctrl+Alt+9` opens a workspace directly. Right-click a tab to hide it without closing it; `Show hidden tabs` in the workspace menu or the command palette restores it. `Manage current workspace → Delete workspace…` asks for confirmation and moves its tabs into another workspace, so one workspace always remains. Workspaces do not share tabs, but they continue to use the same browser profile and saved bookmarks.
 
 The start page is stored locally in `TugleHome.html` and loaded as a normal page. This avoids injecting a large image-embedded HTML string into WebView2, which caused the earlier blank-page bug.
 
@@ -63,7 +63,7 @@ Google sign-in opens inside Tugle using its persistent website profile. Setup ad
 
 Tugle checks `TaiFradl/Tugle` GitHub Releases after launch. Installed copies download a newer Windows installer in the background and ask to restart when it is ready; the installer closes Tugle, preserves the profile, and launches the updated app. Portable copies open the release download instead, since a running portable folder cannot safely replace itself. The same check is available from Settings → Browser settings → Check for updates.
 
-Pushing a tag such as `v2.3.2` builds and publishes both `Tugle-Setup.exe` and `Tugle-browser.zip` through the GitHub Actions release workflow. Update `RELEASE_NOTES.md` before tagging.
+Pushing a version tag such as `v2.3.3` builds and publishes both `Tugle-Setup.exe` and `Tugle-browser.zip` through the GitHub Actions release workflow. Update `RELEASE_NOTES.md` before tagging.
 
 For isolated development checks, `TUGLE_PROFILE_DIRECTORY` can point to a separate profile folder. Settings, history, and WebView2 data then use that folder. Leave it unset for normal use.
 

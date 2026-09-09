@@ -1,5 +1,11 @@
 # What’s new
 
+## 2.3.3 — Workspace cleanup and hidden tabs
+
+- Added confirmation-protected workspace deletion that moves its tabs into another workspace and keeps one workspace available.
+- Added `Hide tab` and multi-selected tab hiding without closing or losing session state.
+- Added hidden-tab restore from the workspace menu and Command Palette, with split-view cleanup and backup persistence.
+
 ## 2.3.2 — Simpler workspace controls
 
 - Workspace rows now show their tab counts so switching is easier to scan.

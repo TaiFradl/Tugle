@@ -326,6 +326,7 @@ internal sealed class TugleSettings
                 IsHome = tab.IsHome,
                 IsActive = tab.IsActive,
                 IsPinned = tab.IsPinned,
+                IsHidden = tab.IsHidden,
                 GroupId = groupId,
                 Url = tab.IsHome ? null : tab.Url!.Trim(),
                 Title = string.IsNullOrWhiteSpace(tab.Title) ? null : TrimText(tab.Title, 120)
@@ -528,6 +529,7 @@ internal sealed class TugleSessionTab
     public bool IsHome { get; set; }
     public bool IsActive { get; set; }
     public bool IsPinned { get; set; }
+    public bool IsHidden { get; set; }
     public Guid? GroupId { get; set; }
     public string? Title { get; set; }
 }

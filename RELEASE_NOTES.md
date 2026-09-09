@@ -1,6 +1,6 @@
-# Tugle 2.3.2
+# Tugle 2.3.3
 
-Workspaces, split view, faster navigation, and a cleaner browser interface.
+Workspace cleanup, hidden tabs, split view, faster navigation, and a cleaner browser interface.
 
 ## What's new
 
@@ -12,6 +12,8 @@ Workspaces, split view, faster navigation, and a cleaner browser interface.
 - Smart link routing to send websites to a chosen workspace or group. Configure it from the workspace switcher.
 - Simpler settings, improved bookmark icons, and consistent Google, DuckDuckGo, and Bing search.
 - The workspace switcher now shows tab counts, keeps advanced tools together, and provides a direct `Move to workspace` action from each tab menu.
+- Delete a workspace safely from `Manage current workspace`; its tabs move to another workspace and the final workspace cannot be deleted.
+- Hide one or several tabs without closing them; restore them from `Show hidden tabs` or the Command Palette. Hidden state survives restart and workspace backups.
 - Clearer audio controls appear only on playing or muted tabs.
 - Search, edit, and manage bookmarks. Read later has been removed; its saved links remain as bookmarks.
 - Most-used sites replace recent sites on Home.
@@ -24,6 +26,6 @@ Workspaces, split view, faster navigation, and a cleaner browser interface.
 
 Download **Tugle-Setup.exe** for the Windows installer with Start Menu and optional desktop shortcuts. **Tugle-browser.zip** remains available for portable use and older versions' update prompts.
 
-Tugle checks for updates when it opens, or from Settings → Browser settings → Check for updates. Installed versions with the newer updater download the installer and ask before restarting. Older and portable versions offer a download. This release is published as **v2.3.2**, which older versions recognize as an update. Existing local settings, bookmarks, and website data are preserved by the installer.
+Tugle checks for updates when it opens, or from Settings → Browser settings → Check for updates. Installed versions with the newer updater download the installer and ask before restarting. Older and portable versions offer a download. This release is published as **v2.3.3**, which older versions recognize as an update. Existing local settings, bookmarks, and website data are preserved by the installer.
 
 Windows x64 and Microsoft Edge WebView2 Runtime are required. Settings and bookmarks stay local to your device; there is no cross-device sync.

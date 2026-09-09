@@ -321,13 +321,13 @@ internal static class Program
             workspaceRoutes = sourceRoutes,
             previousSessionTabs = new[]
             {
-                new { id = primaryTabId, workspaceId = primaryWorkspaceId, url = "https://primary-workspace.example/", title = "Primary", isActive = true, groupId = (Guid?)primaryGroupId },
-                new { id = activeTabId, workspaceId = activeWorkspaceId, url = "https://active-workspace.example/", title = "Active", isActive = false, groupId = (Guid?)activeGroupId },
-                new { id = crossGroupTabId, workspaceId = primaryWorkspaceId, url = "https://cross-group.example/", title = "Cross group", isActive = false, groupId = (Guid?)activeGroupId },
-                new { id = Guid.NewGuid(), workspaceId = staleWorkspaceId, url = "https://orphan-workspace.example/", title = "Orphan", isActive = false, groupId = (Guid?)primaryGroupId },
-                new { id = primaryTabId, workspaceId = primaryWorkspaceId, url = "https://duplicate-tab.example/", title = "Duplicate", isActive = false, groupId = (Guid?)primaryGroupId },
-                new { id = Guid.Empty, workspaceId = primaryWorkspaceId, url = "https://missing-id.example/", title = "Missing ID", isActive = false, groupId = (Guid?)primaryGroupId },
-                new { id = Guid.NewGuid(), workspaceId = primaryWorkspaceId, url = "javascript:alert(1)", title = "Unsafe", isActive = false, groupId = (Guid?)primaryGroupId }
+                new { id = primaryTabId, workspaceId = primaryWorkspaceId, url = "https://primary-workspace.example/", title = "Primary", isActive = true, isHidden = true, groupId = (Guid?)primaryGroupId },
+                new { id = activeTabId, workspaceId = activeWorkspaceId, url = "https://active-workspace.example/", title = "Active", isActive = false, isHidden = false, groupId = (Guid?)activeGroupId },
+                new { id = crossGroupTabId, workspaceId = primaryWorkspaceId, url = "https://cross-group.example/", title = "Cross group", isActive = false, isHidden = false, groupId = (Guid?)activeGroupId },
+                new { id = Guid.NewGuid(), workspaceId = staleWorkspaceId, url = "https://orphan-workspace.example/", title = "Orphan", isActive = false, isHidden = false, groupId = (Guid?)primaryGroupId },
+                new { id = primaryTabId, workspaceId = primaryWorkspaceId, url = "https://duplicate-tab.example/", title = "Duplicate", isActive = false, isHidden = false, groupId = (Guid?)primaryGroupId },
+                new { id = Guid.Empty, workspaceId = primaryWorkspaceId, url = "https://missing-id.example/", title = "Missing ID", isActive = false, isHidden = false, groupId = (Guid?)primaryGroupId },
+                new { id = Guid.NewGuid(), workspaceId = primaryWorkspaceId, url = "javascript:alert(1)", title = "Unsafe", isActive = false, isHidden = false, groupId = (Guid?)primaryGroupId }
             },
             recentlyClosedTabs = new[]
             {
@@ -402,8 +402,9 @@ internal static class Program
         Check(Get<Guid>(primaryTab, "WorkspaceId") == primaryWorkspaceId &&
             Get<Guid?>(primaryTab, "GroupId") == primaryGroupId && Get<Guid>(activeTab, "WorkspaceId") == activeWorkspaceId &&
             Get<Guid?>(activeTab, "GroupId") == activeGroupId && Value(crossGroupTab, "GroupId") is null &&
-            Get<Guid>(orphanTab, "WorkspaceId") == activeWorkspaceId && Value(orphanTab, "GroupId") is null,
-            "session tabs retain groups only inside their workspace and safely migrate orphaned workspace IDs");
+            Get<Guid>(orphanTab, "WorkspaceId") == activeWorkspaceId && Value(orphanTab, "GroupId") is null &&
+            Get<bool>(primaryTab, "IsHidden"),
+            "session tabs retain groups, hidden state, and safe workspace membership");
         Check(Get<Guid?>(primaryWorkspace, "LastActiveTabId") == primaryTabId &&
             Get<Guid?>(activeWorkspace, "LastActiveTabId") == activeTabId,
             "each workspace restores a valid last-active tab independently");
@@ -549,12 +550,18 @@ internal static class Program
         var workspaceLabels = workspaceMenu.Items.Cast<ToolStripItem>().Select(item => item.Text).ToArray();
         var advanced = workspaceMenu.Items.OfType<ToolStripMenuItem>()
             .FirstOrDefault(item => item.Text == "More workspace settings");
+        var manage = workspaceMenu.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(item => item.Text == "Manage current workspace");
         var advancedLabels = advanced is null
             ? Array.Empty<string>()
             : advanced!.DropDownItems.OfType<ToolStripItem>().Select(item => item.Text).ToArray();
-        Check(workspaceLabels.Any(label => label.Contains("tab", StringComparison.OrdinalIgnoreCase)) &&
+        string?[] manageLabels = [];
+        if (manage is not null)
+            manageLabels = manage.DropDownItems.OfType<ToolStripItem>().Select(item => item.Text).ToArray();
+        Check(workspaceLabels.Any(label => label?.Contains("tab", StringComparison.OrdinalIgnoreCase) == true) &&
             workspaceLabels.Contains("New workspace…") && workspaceLabels.Contains("New from template") &&
-            workspaceLabels.Contains("Manage current workspace") && advanced is not null &&
+            workspaceLabels.Contains("Manage current workspace") && manage is not null &&
+            manageLabels.Contains("Delete workspace…") && advanced is not null &&
             advancedLabels.Contains("Auto-group sites…") && advancedLabels.Contains("Always open sites in…") &&
             advancedLabels.Contains("Export workspaces…") && advancedLabels.Contains("Import workspace backup…"),
             "workspace menu keeps switching simple and advanced controls tucked away");
@@ -814,6 +821,8 @@ internal static class Program
         {
             Check(tabMenu.Items.OfType<ToolStripItem>().Any(item => item.Text == "Move to workspace"),
                 "tab menu offers a direct workspace move");
+            Check(tabMenu.Items.OfType<ToolStripItem>().Any(item => item.Text == "Hide tab"),
+                "tab menu offers a hide tab action");
         }
 
         await (Task)Call(form, "OpenSplitViewAsync", first)!;
@@ -829,6 +838,22 @@ internal static class Program
         Call(form, "CloseSplitView", true);
         Check(Value(form, "_splitLeftTab") is null && Value(form, "_splitRightTab") is null && !divider.Visible,
             "split view closes without closing either tab");
+
+        var hiddenBatch = Array.CreateInstance(first.GetType(), 1);
+        hiddenBatch.SetValue(first, 0);
+        await (Task)Call(form, "HideTabsAsync", hiddenBatch)!;
+        Check(Get<bool>(first, "IsHidden") &&
+            !((IEnumerable)Call(form, "GetDisplayedTabs")!).Cast<object>().Contains(first),
+            "hidden tabs leave the strip without closing");
+        Call(form, "PopulateWorkspaceMenu");
+        var workspaceMenu = Get<ContextMenuStrip>(form, "_workspaceMenu");
+        var showHidden = workspaceMenu.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(item => item.Text?.StartsWith("Show hidden tabs", StringComparison.Ordinal) == true);
+        Check(showHidden is not null, "workspace menu offers hidden tabs when tabs are concealed");
+        showHidden?.PerformClick();
+        Check(!Get<bool>(first, "IsHidden") &&
+            ((IEnumerable)Call(form, "GetDisplayedTabs")!).Cast<object>().Contains(first),
+            "hidden tabs can be restored from the workspace menu");
     }
 
     private static async Task TestScaleDownAsync(MainForm form)
