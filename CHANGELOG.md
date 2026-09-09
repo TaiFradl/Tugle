@@ -1,11 +1,19 @@
 # What’s new
 
+## 2.3.2 — Simpler workspace controls
+
+- Workspace rows now show their tab counts so switching is easier to scan.
+- Workspace management is separated from advanced grouping, routing, and backup tools.
+- Tabs can be moved directly to another workspace from the tab menu, including multi-selected tabs.
+- Clarified workspace action names and updated the public version for automatic updates.
+
 ## 2.3.0 — Workspaces, split view, and browser polish
 
 - Added workspaces with separate tab sets, startup pages, search and privacy preferences, colors, icons, templates, and portable backups.
 - Added collapsible tab groups, multi-tab selection, drag-and-drop grouping, automatic grouping rules, and workspace memory controls.
 - Added a searchable command palette (`Ctrl+Shift+P`) and split view (`Ctrl+Shift+S`) with a draggable divider and double-click reset.
 - Added smart site routing into workspaces and groups, with clearer routing choices and explicit route removal.
+- Simplified the workspace switcher with tab counts, a direct `Move to workspace` tab action, and one home for advanced workspace tools.
 - Polished palette spacing, search ranking, empty results, and accessibility labels.
 - Updated the application and installer to 2.3.0 so older versions detect the new public release.
 

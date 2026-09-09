@@ -547,10 +547,17 @@ internal static class Program
         Call(form, "PopulateWorkspaceMenu");
         var workspaceMenu = Get<ContextMenuStrip>(form, "_workspaceMenu");
         var workspaceLabels = workspaceMenu.Items.Cast<ToolStripItem>().Select(item => item.Text).ToArray();
-        Check(workspaceLabels.Contains("New workspace…") && workspaceLabels.Contains("New from template") &&
-            workspaceLabels.Contains("Automatic grouping rules") && workspaceLabels.Contains("Smart link routing") && workspaceLabels.Contains("Export workspaces…") &&
-            workspaceLabels.Contains("Import workspace backup…"),
-            "workspace menu exposes templates, rules, and portable backup controls");
+        var advanced = workspaceMenu.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(item => item.Text == "More workspace settings");
+        var advancedLabels = advanced is null
+            ? Array.Empty<string>()
+            : advanced!.DropDownItems.OfType<ToolStripItem>().Select(item => item.Text).ToArray();
+        Check(workspaceLabels.Any(label => label.Contains("tab", StringComparison.OrdinalIgnoreCase)) &&
+            workspaceLabels.Contains("New workspace…") && workspaceLabels.Contains("New from template") &&
+            workspaceLabels.Contains("Manage current workspace") && advanced is not null &&
+            advancedLabels.Contains("Auto-group sites…") && advancedLabels.Contains("Always open sites in…") &&
+            advancedLabels.Contains("Export workspaces…") && advancedLabels.Contains("Import workspace backup…"),
+            "workspace menu keeps switching simple and advanced controls tucked away");
     }
 
     private static void SaveControl(Control control, string name)
@@ -802,6 +809,12 @@ internal static class Program
         Check(commandEntries.Any(entry => Get<string>(entry, "Title") == "Toggle split view") &&
             commandEntries.Any(entry => Get<string>(entry, "Title").Contains("Research")),
             "command palette indexes browser actions and workspaces");
+
+        using (var tabMenu = (ContextMenuStrip)Call(form, "CreateTabContextMenu", first)!)
+        {
+            Check(tabMenu.Items.OfType<ToolStripItem>().Any(item => item.Text == "Move to workspace"),
+                "tab menu offers a direct workspace move");
+        }
 
         await (Task)Call(form, "OpenSplitViewAsync", first)!;
         var splitLeft = Get<object>(form, "_splitLeftTab");

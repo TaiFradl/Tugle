@@ -3,7 +3,7 @@
 ; history, and WebView2 website data unless the user removes that profile manually.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.3.0"
+  #define MyAppVersion "2.3.2"
 #endif
 #ifndef SourceDirectory
   #define SourceDirectory "..\publish\Tugle"

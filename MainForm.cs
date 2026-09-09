@@ -441,7 +441,9 @@ public sealed class MainForm : SnapWindowForm
         _workspaceButton.ForeColor = _text;
         _workspaceButton.BackColor = _chrome;
         _workspaceButton.AccessibleDescription = $"Current workspace: {workspace.Name}. Switch workspaces.";
-        _tooltips.SetToolTip(_workspaceButton, $"{workspace.Name} workspace (Ctrl+Shift+W)");
+        var workspaceTabCount = GetWorkspaceTabCount(workspace.Id);
+        _tooltips.SetToolTip(_workspaceButton,
+            $"{workspace.Name} · {workspaceTabCount} tab{(workspaceTabCount == 1 ? string.Empty : "s")} (Ctrl+Shift+W)");
         _workspaceButton.Invalidate();
         if (_titleArea is not null) LayoutTabStrip(_titleArea);
     }
@@ -2076,6 +2078,9 @@ public sealed class MainForm : SnapWindowForm
         var workspaceItem = new ToolStripMenuItem("Tab group") { Visible = !_isPrivate };
         workspaceItem.DropDownOpening += (_, _) => PopulateTabGroupMenu(workspaceItem, tab);
 
+        var moveWorkspaceItem = new ToolStripMenuItem("Move to workspace") { Visible = !_isPrivate };
+        moveWorkspaceItem.DropDownOpening += (_, _) => PopulateTabWorkspaceMenu(moveWorkspaceItem, tab);
+
         var splitItem = new ToolStripMenuItem();
         splitItem.Click += async (_, _) => await ToggleSplitViewAsync(tab);
 
@@ -2102,6 +2107,7 @@ public sealed class MainForm : SnapWindowForm
             reloadItem.Enabled = !tab.IsClosing && tab.View.CoreWebView2 is not null;
             pinItem.Enabled = !tab.IsClosing;
             workspaceItem.Enabled = !_isPrivate && !tab.IsClosing && _tabs.Contains(tab);
+            moveWorkspaceItem.Enabled = workspaceItem.Enabled && _settings.Workspaces.Count > 1;
             var splitCandidateExists = ActiveWorkspaceTabs.Any(item => !ReferenceEquals(item, tab));
             splitItem.Visible = !tab.IsClosing && tab.WorkspaceId == ActiveWorkspaceId && splitCandidateExists;
             splitItem.Text = IsSplitParticipant(tab) ? "Close split view" : "Open in split view";
@@ -2113,6 +2119,7 @@ public sealed class MainForm : SnapWindowForm
         menu.Items.Add(muteItem);
         menu.Items.Add(pinItem);
         menu.Items.Add(workspaceItem);
+        menu.Items.Add(moveWorkspaceItem);
         menu.Items.Add(splitItem);
         menu.Items.Add(duplicateItem);
         menu.Items.Add(bookmarkItem);
@@ -2121,6 +2128,40 @@ public sealed class MainForm : SnapWindowForm
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(closeItem);
         return menu;
+    }
+
+    private void PopulateTabWorkspaceMenu(ToolStripMenuItem menu, BrowserTab tab)
+    {
+        menu.DropDownItems.Clear();
+        if (_isPrivate || tab.IsClosing || !_tabs.Contains(tab))
+        {
+            menu.Enabled = false;
+            return;
+        }
+
+        var selectedTabs = GetTabsForOperation(tab);
+        foreach (var workspace in _settings.Workspaces)
+        {
+            var targetWorkspace = workspace;
+            var tabCount = GetWorkspaceTabCount(targetWorkspace.Id);
+            var item = new ToolStripMenuItem(
+                $"{targetWorkspace.Icon}  {targetWorkspace.Name}  ·  {tabCount} tab{(tabCount == 1 ? string.Empty : "s")}")
+            {
+                Checked = targetWorkspace.Id == tab.WorkspaceId,
+                Enabled = targetWorkspace.Id != tab.WorkspaceId
+            };
+            item.Click += async (_, _) => await MoveTabsToWorkspaceAsync(selectedTabs, targetWorkspace.Id);
+            menu.DropDownItems.Add(item);
+        }
+
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        var hint = new ToolStripMenuItem(selectedTabs.Count > 1
+            ? $"Move {selectedTabs.Count} selected tabs"
+            : "Move this tab")
+        {
+            Enabled = false
+        };
+        menu.DropDownItems.Add(hint);
     }
 
     private void PopulateTabGroupMenu(ToolStripMenuItem menu, BrowserTab tab)
@@ -2214,7 +2255,7 @@ public sealed class MainForm : SnapWindowForm
         if (host is null || availableGroups.Length == 0) return;
 
         menu.DropDownItems.Add(new ToolStripSeparator());
-        var rulesItem = new ToolStripMenuItem("Automatic grouping");
+        var rulesItem = new ToolStripMenuItem("Auto-group this site");
         foreach (var group in availableGroups)
         {
             var ruleItem = new ToolStripMenuItem($"Always send {host} to {group.Name}")
@@ -2663,6 +2704,44 @@ public sealed class MainForm : SnapWindowForm
         SaveSettings();
     }
 
+    private async Task MoveTabsToWorkspaceAsync(IReadOnlyCollection<BrowserTab> sourceTabs, Guid targetWorkspaceId)
+    {
+        if (_isPrivate || GetWorkspace(targetWorkspaceId) is not { } target) return;
+
+        var moving = sourceTabs
+            .Where(tab => _tabs.Contains(tab) && !tab.IsClosing)
+            .Distinct()
+            .ToArray();
+        if (moving.Length == 0 || moving.All(tab => tab.WorkspaceId == targetWorkspaceId)) return;
+
+        if (HasSplitView && moving.Any(IsSplitParticipant))
+            CloseSplitView(revealActive: false);
+
+        foreach (var tab in moving)
+        {
+            if (GetWorkspace(tab.WorkspaceId) is { } source && ReferenceEquals(tab, _activeTab))
+                source.LastActiveTabId = _tabs.FirstOrDefault(item => item.WorkspaceId == source.Id &&
+                    !ReferenceEquals(item, tab) && !item.IsClosing)?.Id;
+
+            tab.WorkspaceId = targetWorkspaceId;
+            // Groups belong to their workspace, so a cross-workspace move starts
+            // ungrouped and can be assigned to a destination group immediately.
+            tab.GroupId = null;
+            UpdateTabButton(tab);
+        }
+
+        target.LastActiveTabId = moving[0].Id;
+        ClearTabSelection();
+        LayoutTabs();
+        CapturePreviousSession();
+        SaveSettings();
+
+        if (targetWorkspaceId != ActiveWorkspaceId)
+            await SwitchWorkspaceAsync(targetWorkspaceId);
+        else
+            await ActivateTabAsync(moving[0]);
+    }
+
     private void ShowWorkspaceMenu()
     {
         if (_isPrivate || IsDisposed) return;
@@ -2735,14 +2814,16 @@ public sealed class MainForm : SnapWindowForm
         if (_isPrivate) return;
 
         var active = _settings.ActiveWorkspace;
-        var summary = new ToolStripMenuItem(GetWorkspaceMemorySummary(active.Id)) { Enabled = false };
+        var activeTabCount = GetWorkspaceTabCount(active.Id);
+        var summary = new ToolStripMenuItem($"Current: {active.Name} · {activeTabCount} tab{(activeTabCount == 1 ? string.Empty : "s")}") { Enabled = false };
         _workspaceMenu.Items.Add(summary);
         _workspaceMenu.Items.Add(new ToolStripSeparator());
 
         foreach (var workspace in _settings.Workspaces)
         {
             var workspaceId = workspace.Id;
-            var item = new ToolStripMenuItem($"{workspace.Icon}  {workspace.Name}")
+            var tabCount = GetWorkspaceTabCount(workspaceId);
+            var item = new ToolStripMenuItem($"{workspace.Icon}  {workspace.Name}  ·  {tabCount} tab{(tabCount == 1 ? string.Empty : "s")}")
             {
                 Checked = workspaceId == ActiveWorkspaceId,
                 ToolTipText = GetWorkspaceMemorySummary(workspaceId)
@@ -2770,7 +2851,7 @@ public sealed class MainForm : SnapWindowForm
         }
         _workspaceMenu.Items.Add(templates);
 
-        var manage = new ToolStripMenuItem("Current workspace");
+        var manage = new ToolStripMenuItem("Manage current workspace");
         var rename = new ToolStripMenuItem("Rename…");
         rename.Click += (_, _) => RenameWorkspace(active.Id);
         manage.DropDownItems.Add(rename);
@@ -2820,11 +2901,11 @@ public sealed class MainForm : SnapWindowForm
         manage.DropDownItems.Add(preferences);
         _workspaceMenu.Items.Add(manage);
 
-        var rules = new ToolStripMenuItem("Automatic grouping rules");
+        var rules = new ToolStripMenuItem("Auto-group sites…");
         var activeRules = active.Rules.Where(rule => rule.Enabled).OrderBy(rule => rule.HostPattern).ToArray();
         if (activeRules.Length == 0)
         {
-            rules.DropDownItems.Add(new ToolStripMenuItem("Create one from a tab’s Tab group menu") { Enabled = false });
+            rules.DropDownItems.Add(new ToolStripMenuItem("Use a tab’s Groups menu to add one") { Enabled = false });
         }
         else
         {
@@ -2844,19 +2925,19 @@ public sealed class MainForm : SnapWindowForm
                 rules.DropDownItems.Add(item);
             }
         }
-        _workspaceMenu.Items.Add(rules);
-
-        var routing = new ToolStripMenuItem("Smart link routing");
+        var routing = new ToolStripMenuItem("Always open sites in…");
         PopulateWorkspaceRoutingMenu(routing);
-        _workspaceMenu.Items.Add(routing);
-
-        _workspaceMenu.Items.Add(new ToolStripSeparator());
+        var advanced = new ToolStripMenuItem("More workspace settings");
+        advanced.DropDownItems.Add(rules);
+        advanced.DropDownItems.Add(routing);
+        advanced.DropDownItems.Add(new ToolStripSeparator());
         var exportItem = new ToolStripMenuItem("Export workspaces…");
         exportItem.Click += (_, _) => ExportWorkspaceBackup();
         var importItem = new ToolStripMenuItem("Import workspace backup…");
         importItem.Click += async (_, _) => await ImportWorkspaceBackupAsync();
-        _workspaceMenu.Items.Add(exportItem);
-        _workspaceMenu.Items.Add(importItem);
+        advanced.DropDownItems.Add(exportItem);
+        advanced.DropDownItems.Add(importItem);
+        _workspaceMenu.Items.Add(advanced);
     }
 
     private void PopulateWorkspaceRoutingMenu(ToolStripMenuItem menu)
@@ -3143,6 +3224,9 @@ public sealed class MainForm : SnapWindowForm
             ? "No open tabs"
             : $"{tabs.Length} tab{(tabs.Length == 1 ? string.Empty : "s")} · savings: {suspended} paused, {discarded} unloaded";
     }
+
+    private int GetWorkspaceTabCount(Guid workspaceId) =>
+        _tabs.Count(tab => !tab.IsClosing && tab.WorkspaceId == workspaceId);
 
     private void ExportWorkspaceBackup()
     {
@@ -4126,7 +4210,7 @@ public sealed class MainForm : SnapWindowForm
                 AddActionFlyoutButton("Performance", "Memory saver for inactive tabs", ShowPerformanceMenu)
                     .ValueText = _settings.LowMemoryMode ? "On" : "Off";
                 AddActionFlyoutButton("Privacy and protection", "Private windows, tracking controls, and browsing-data cleanup", ShowPrivacyMenu);
-                AddActionFlyoutSectionLabel("Tugle", typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "2.3.0");
+                AddActionFlyoutSectionLabel("Tugle", typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "2.3.2");
                 AddActionFlyoutButton(
                     "Check for updates",
                     "Download the latest Tugle package",
@@ -5998,12 +6082,14 @@ public sealed class MainForm : SnapWindowForm
         if (!ReferenceEquals(_draggedTab, tab)) return;
 
         var targetGroupId = _dragGroupTarget is null ? null : GetTabGroup(_dragGroupTarget)?.Id;
+        var draggedCopy = _draggedTabs.ToArray();
         if (_dragGroupTarget is not null) _dragGroupTarget.Button.DropTarget = false;
         _dragGroupTarget = null;
         _draggedTab = null;
         _tabsFlow.Cursor = Cursors.Default;
         foreach (var dragged in _draggedTabs) dragged.Button.IsDragging = false;
-        if (targetGroupId is { } groupId) AssignTabsToGroup(_draggedTabs, groupId);
+        if (targetGroupId is { } groupId)
+            AssignTabsToGroup(draggedCopy, groupId);
         _draggedTabs.Clear();
         OrderPinnedTabs();
         CapturePreviousSession();
